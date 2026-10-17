@@ -25,3 +25,5 @@ def test_local_development_origins_still_work(monkeypatch, tmp_path):
     with TestClient(app) as client:
         for origin in ("http://localhost:5173", "http://127.0.0.1:5173"):
             assert client.get("/api/state", headers={"Origin": origin}).headers["access-control-allow-origin"] == origin
+        origin = "https://frontend-zeta-olive-60.vercel.app"
+        assert client.get("/api/state", headers={"Origin": origin}).headers["access-control-allow-origin"] == origin

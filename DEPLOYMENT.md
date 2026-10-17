@@ -1,6 +1,6 @@
 # Render backend + Vercel frontend
 
-The frontend is https://frontend-zeta-olive-60.vercel.app. It calls the Render backend directly over HTTPS and WSS.
+The frontend is https://frontend-zeta-olive-60.vercel.app. The backend is https://hacktoberfest-proofline-phk4.onrender.com. Production builds call Render directly over HTTPS and WSS.
 
 ## 1. Fix the existing Render build
 
@@ -35,7 +35,9 @@ Comma-separated additional exact frontend origins can be added to `MAYDAY_ALLOWE
 
 Use the **Vite** framework, Root Directory `frontend`, Install Command `npm ci`, Build Command `npm run build`, and Output Directory `dist`. Enable access to source files outside the root directory if Vercel requests it: the frontend imports the shared `contracts/types.ts` file.
 
-In Vercel's Environment Variables, set `VITE_BACKEND_URL` to your actual Render service origin, for example `https://your-service.onrender.com`. Do not add `/api` or `/ws`.
+`frontend/.env.production` already sets `VITE_BACKEND_URL=https://hacktoberfest-proofline-phk4.onrender.com` for this demo. The backend allows the confirmed Vercel origin by default. These are public addresses, not credentials.
+
+To use a different service, set `VITE_BACKEND_URL` in Vercel's Environment Variables to the new Render origin. Do not add `/api` or `/ws`. Explicit Vercel environment settings override the committed production value.
 
 Redeploy the frontend after setting or changing that variable. Vite embeds it at build time. REST calls, audio uploads, bulletin images and WebSockets all use this origin. HTTPS automatically becomes WSS for `/ws`.
 
@@ -51,9 +53,9 @@ The API and simulator can start while the model is unavailable, but live Gemma i
 
 ## 4. Verify
 
-1. Open `https://YOUR-RENDER-SERVICE.onrender.com/api/health`: check `ok`, then inspect `model.healthy` and `model.warm` separately.
+1. Open `https://hacktoberfest-proofline-phk4.onrender.com/api/health`: check `ok`, then inspect `model.healthy` and `model.warm` separately.
 2. Redeploy Vercel with `VITE_BACKEND_URL`, then open the frontend.
-3. In the browser Network panel, confirm API requests go to Render and the `wss://YOUR-RENDER-SERVICE.onrender.com/ws` connection opens.
+3. In the browser Network panel, confirm API requests go to Render and the `wss://hacktoberfest-proofline-phk4.onrender.com/ws` connection opens.
 4. Start a traffic surge, inspect the preview, and approve the simulated fix.
 
 This is a synthetic, single-process demo. Use one backend worker/instance because simulation and approval state live in memory. A restart resets that state; `/tmp` recordings are temporary.

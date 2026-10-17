@@ -18,3 +18,5 @@ backend/runs/
 .env
 .env.*
 !.env.example
+# This production file contains only the public Render origin, never credentials.
+!frontend/.env.production
