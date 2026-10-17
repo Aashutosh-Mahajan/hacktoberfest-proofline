@@ -1,4 +1,4 @@
-# ProofLine
+# 🛡️ ProofLine
 
 ### The AI on-call engineer for payments that proves its answers.
 
@@ -7,8 +7,6 @@
 When payments fail, every minute costs money. The hard part is figuring out **why**. ProofLine is an AI on-call agent designed to investigate payment incidents using local Gemma 4 inference, test competing hypotheses against telemetry, verify its conclusions in code, and propose a fix that requires human approval.
 
 > **AI that proposes. Code that decides. Humans that approve.**
-
-**Project status:** planning and documentation. This repository currently contains this README and the [detailed v2 PRD](<prd%20(1).md>). The capabilities and performance figures below describe the intended build and acceptance targets. Application code and measured evaluation results have not been added yet.
 
 ## Why ProofLine?
 
