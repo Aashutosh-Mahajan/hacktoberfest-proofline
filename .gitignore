@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+node_modules/
+dist/
+.venv/
+*.duckdb
+eval/results/runs/
+.server.log
+.e2e.py
+.pytest_cache/
