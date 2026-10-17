@@ -1,9 +1,9 @@
 import type { Envelope } from "@contract";
 import { useStore } from "../store/store";
+import { backendWebSocketUrl } from "./endpoints";
 
 export function defaultWsUrl(): string {
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  return proto + "://" + location.host + "/ws";
+  return backendWebSocketUrl();
 }
 
 /** WebSocket client: resume by last seq, exponential backoff, batched dispatch (one store write per frame). */

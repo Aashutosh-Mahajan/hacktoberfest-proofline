@@ -21,8 +21,12 @@ npm test               # vitest (reducer covers every EventMap event)
 
 
 ## Redesign and performance notes
-- Plain-language UI: vocabulary lives in `src/lib/words.ts` (technical terms stay as tooltips). Views: Live (health hero, suggested fix, "What the AI is doing"), Banks, Messages, Ask, Results; scenario controls, replay and chaos live in the **Simulate** popover.
+- Plain-language UI: vocabulary lives in `src/lib/words.ts` (technical terms stay as tooltips). Views: Live (health hero, suggested fix, "What the AI is doing"), Banks and Ask; scenario controls, replay and chaos live in the **Simulate** popover.
 - Backend rates are PERCENT. A snapshot fully resets the store; events replayed after it (seq below the snapshot seq) are applied; `pending_action` restores the Approve button after a reconnect. The WS client always connects with `since=0`.
 - 4 Hz metrics are kept in `src/store/chartBuffer.ts` (outside React); uPlot is lazy-loaded and repainted once per frame. KPIs and tiles re-render at most 2 Hz (`useThrottled`). Rarely used views are code-split.
 - `npm run demo` serves the production build on :5173 with the same `/api` and `/ws` proxy (`MAYDAY_BACKEND` overrides the target, `MAYDAY_PORT` the port).
-- `npm run test:e2e` runs a Playwright smoke test against a real backend (default `http://localhost:8003`; start it with `MAYDAY_GATEWAY=scripted python -m uvicorn mayday.api.app:app --port 8003`).
+- `npm run test:e2e` runs a Playwright smoke test against a real backend (default `http://localhost:8003`; start it with `python -m uvicorn mayday.api.app:app --port 8003` from `backend`).
+
+## Vercel + Render
+
+Set `VITE_BACKEND_URL` in Vercel to your Render backend origin and redeploy. API calls and uploads use HTTPS; the live connection uses WSS at the same host. Leave it empty for the local Vite proxy. See [the deployment guide](../DEPLOYMENT.md) for Render root-directory settings, CORS and Gemma hosting.

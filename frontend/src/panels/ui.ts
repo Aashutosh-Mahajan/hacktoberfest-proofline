@@ -1,4 +1,5 @@
 import type { CSSProperties } from "react";
+import { backendUrl } from "../net/endpoints";
 
 const v = (name: string, fb: string) => `var(${name}, ${fb})`;
 export const C = {
@@ -28,7 +29,7 @@ export const h3: CSSProperties = { margin: "0 0 8px", fontSize: 14, fontWeight: 
 
 export async function jsonCall(method: string, path: string, body?: unknown): Promise<{ ok: boolean; error?: string; [k: string]: unknown }> {
   try {
-    const res = await fetch(path, {
+    const res = await fetch(backendUrl(path), {
       method,
       headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,

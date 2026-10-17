@@ -369,7 +369,9 @@ def build_app(autostart: bool = None, use_agent: bool = True, orchestrator=None,
 
     app = FastAPI(title="ProofLine", lifespan=lifespan)
     app.state.hub = hub
-    app.add_middleware(CORSMiddleware, allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+    allowed_origins += [origin.strip().rstrip("/") for origin in os.environ.get("MAYDAY_ALLOWED_ORIGINS", "").split(",") if origin.strip()]
+    app.add_middleware(CORSMiddleware, allow_origins=list(dict.fromkeys(allowed_origins)),
                        allow_methods=["*"], allow_headers=["*"], allow_credentials=True)
 
     def err(msg, code=400):

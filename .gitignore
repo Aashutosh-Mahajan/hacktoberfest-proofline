@@ -15,3 +15,6 @@ frontend/.vite.log
 frontend/test-results/
 frontend/playwright-report/
 backend/runs/
+.env
+.env.*
+!.env.example

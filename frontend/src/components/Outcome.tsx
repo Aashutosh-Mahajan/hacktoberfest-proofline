@@ -3,6 +3,7 @@ import type { Evidence } from "@contract";
 import { useStore } from "../store/store";
 import { useUi } from "../lib/ui";
 import { api } from "../net/api";
+import { backendUrl } from "../net/endpoints";
 import { confidencePct, fmtDuration, fmtPct, fmtRupees } from "../lib/format";
 import { actionExplain, actionPlain, failoverBanks, fixInfo, plainify, SCENARIO_PLAIN } from "../lib/words";
 
@@ -204,7 +205,7 @@ export function EvidenceDrawer() {
           {lines && <><div className="subhead" style={{ margin: 0 }}>Error log lines</div><pre className="diff">{lines.map((l, i) => <div key={i} className={l.level === "ERROR" ? "d" : ""}>{l.level} {l.service}: {l.msg}</div>)}</pre></>}
           {bul && (
             <div>
-              <img src={bul.image_url} alt={`Status notice from ${bul.extracted.bank}`} />
+              <img src={backendUrl(bul.image_url)} alt={`Status notice from ${bul.extracted.bank}`} />
               <div className={"verify" + (bul.consistent ? "" : " amber")}>
                 <b>{bul.consistent ? "The bank's notice matches our data" : "The bank's notice does not match our data"}</b>
                 <div>{bul.detail}</div>

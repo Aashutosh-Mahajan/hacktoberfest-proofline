@@ -290,3 +290,5 @@ Backend only: `cd backend && python -m uvicorn mayday.api.app:app --port 8000`. 
 (or `cd backend && python -m pytest -q -p no:warnings`; add `-m "not slow"` to skip the soak and 30-minute false-positive sweeps).
 Health check: `GET /api/health`. Recorded incident runs are written to `backend/runs/` (last 10 kept) and can be
 replayed from the UI or via `POST /api/replay/start {"run_id": ...}`.
+
+For the hosted backend and frontend, follow [Render + Vercel deployment](DEPLOYMENT.md).
