@@ -292,3 +292,7 @@ Health check: `GET /api/health`. Recorded incident runs are written to `backend/
 replayed from the UI or via `POST /api/replay/start {"run_id": ...}`.
 
 For the hosted backend and frontend, follow [Render + Vercel deployment](DEPLOYMENT.md).
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
