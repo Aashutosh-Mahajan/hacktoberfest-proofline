@@ -1,0 +1,62 @@
+{
+  "generated": "2026-10-17",
+  "model": "scripted",
+  "total_runs": 70,
+  "false_incident_rate": 0.0,
+  "rows": [
+    {
+      "scenario": "S0",
+      "runs": 10,
+      "accuracy": 1.0,
+      "median_rca_s": 0.0,
+      "p90_rca_s": 0.0,
+      "mean_tool_calls": 0,
+      "verifier_rejection_rate": 0.0,
+      "twin_error_s": 0.0
+    },
+    {
+      "scenario": "S1",
+      "runs": 10,
+      "accuracy": 0.3,
+      "median_rca_s": 4.0,
+      "p90_rca_s": 4.0,
+      "mean_tool_calls": 3,
+      "verifier_rejection_rate": 0.75,
+      "twin_error_s": 13.0
+    },
+    {
+      "scenario": "S3",
+      "runs": 10,
+      "accuracy": 0.5,
+      "median_rca_s": 4.0,
+      "p90_rca_s": 4.0,
+      "mean_tool_calls": 6,
+      "verifier_rejection_rate": 0.8,
+      "twin_error_s": 11.2,
+      "decoy_cleared_pct": 50.0
+    },
+    {
+      "scenario": "S5",
+      "runs": 10,
+      "accuracy": 0.2,
+      "median_rca_s": 0.0,
+      "p90_rca_s": 0.0,
+      "mean_tool_calls": 4,
+      "verifier_rejection_rate": 0.9231,
+      "twin_error_s": 0.0,
+      "correctly_not_remediated_pct": 100.0
+    }
+  ],
+  "ablations": [
+    {
+      "name": "verifier on",
+      "accuracy": 0.3333,
+      "runs": 30
+    },
+    {
+      "name": "verifier off",
+      "accuracy": 0.3333,
+      "runs": 30
+    }
+  ]
+}
