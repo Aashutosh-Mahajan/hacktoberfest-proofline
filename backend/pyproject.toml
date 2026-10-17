@@ -7,3 +7,4 @@ requires-python = ">=3.11"
 pythonpath = ["."]
 testpaths = ["tests"]
 addopts = "-q"
+markers = ["slow: long simulations (soak / 30-minute false-positive sweeps)"]

@@ -84,7 +84,7 @@ def build_report(results: Iterable[dict], model: str = "scripted", generated: st
 
 
 def to_markdown(rep: dict) -> str:
-    L = [f"# Proofline eval - {rep['generated']}", "",
+    L = [f"# ProofLine eval - {rep['generated']}", "",
          f"Model: `{rep['model']}` | total runs: {rep['total_runs']} | false-incident rate (S0): {rep['false_incident_rate']:.1%}", "",
          "| Scenario | Runs | Accuracy | Decoy cleared % | Not remediated % | Median RCA s | p90 RCA s | Tool calls | Verifier rej. | Twin err s |",
          "|---|---|---|---|---|---|---|---|---|---|"]

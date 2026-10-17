@@ -271,3 +271,22 @@ Built for **Hacktober Hack Day**, competing in the **Best Use of Google Gemma** 
 | **Kushagra Rajput** | Team member |
 
 Event tags: **#HF26Mumbai · #Oct26MTP · #mumtechup**
+
+## Quick start
+
+Requirements: Python 3.11+, Node 18+, and (for the real model) [Ollama](https://ollama.com) with a Gemma 4 model pulled.
+
+```bash
+# one-time setup
+cd backend && pip install -r requirements.txt && cd ..
+cd frontend && npm install && cd ..
+
+# run backend (http://localhost:8000) + frontend (http://localhost:5173) together
+make dev                                              # Linux / macOS / Windows (make)
+powershell -ExecutionPolicy Bypass -File scripts/dev.ps1   # Windows without make
+```
+
+Backend only: `cd backend && python -m uvicorn mayday.api.app:app --port 8000`. Tests: `make test`
+(or `cd backend && python -m pytest -q -p no:warnings`; add `-m "not slow"` to skip the soak and 30-minute false-positive sweeps).
+Health check: `GET /api/health`. Recorded incident runs are written to `backend/runs/` (last 10 kept) and can be
+replayed from the UI or via `POST /api/replay/start {"run_id": ...}`.

@@ -9,8 +9,16 @@ export default defineConfig({
   plugins: [react()],
   resolve: { alias: { "@contract": path.resolve(__dirname, "../contracts/types.ts") } },
   server: {
-    port: 5173,
+    port: Number(process.env.MAYDAY_PORT ?? 5173),
     fs: { allow: [path.resolve(__dirname, "..")] },
+    proxy: {
+      "/api": { target: backend, changeOrigin: true },
+      "/ws": { target: backend.replace(/^http/, "ws"), ws: true, changeOrigin: true },
+    },
+  },
+  // `npm run demo` serves the production build with the same /api and /ws proxy as the dev server
+  preview: {
+    port: Number(process.env.MAYDAY_PORT ?? 5173),
     proxy: {
       "/api": { target: backend, changeOrigin: true },
       "/ws": { target: backend.replace(/^http/, "ws"), ws: true, changeOrigin: true },

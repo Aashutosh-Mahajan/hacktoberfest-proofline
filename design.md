@@ -1,4 +1,4 @@
-# Proofline — Design (v2)
+# ProofLine — Design (v2)
 
 See `prd.md` for product requirements. This document fixes architecture and ownership so work can run in parallel.
 

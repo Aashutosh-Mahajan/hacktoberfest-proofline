@@ -14,15 +14,20 @@ let transport: Transport = {
       headers: body !== undefined ? { "Content-Type": "application/json" } : undefined,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
+    if (res.status === 409) return { ok: false, error: "Replay in progress. Stop the replay to use live controls." };
     const text = await res.text();
     let json: unknown = {};
-    try { json = text ? JSON.parse(text) : {}; } catch { json = { ok: false, error: text.slice(0, 200) }; }
+    try { json = text ? JSON.parse(text) : {}; } catch {
+      // HTML / plain text instead of JSON: the dev proxy or backend is not answering this path
+      const html = /^\s*<(!doctype|html)/i.test(text);
+      json = { ok: false, error: html ? "Backend not reachable (proxy returned a web page)" : "Unexpected non-JSON response (HTTP " + res.status + ")" };
+    }
     if (!res.ok && (json as { ok?: boolean }).ok !== false) return { ok: false, error: "HTTP " + res.status };
     return json;
   },
   async upload(path, form) {
     const res = await fetch(path, { method: "POST", body: form });
-    return res.json();
+    try { return await res.json(); } catch { return { ok: false, error: "Backend not reachable (non-JSON response)" }; }
   },
 };
 
@@ -43,6 +48,11 @@ async function call(method: string, path: string, body?: unknown): Promise<ApiRe
 }
 
 export const api = {
+  setModel: (model: string) => call("POST", "/api/model", { model }),
+  /** Quiet GET (no toast) for polling. */
+  async healthQuiet(): Promise<ApiResult | null> {
+    try { return (await transport.request("GET", "/api/health")) as ApiResult; } catch { return null; }
+  },
   health: () => call("GET", "/api/health"),
   state: () => call("GET", "/api/state"),
   scenario: (scenario: Scenario, severity?: number, fault_offset_s?: number, seed?: number) =>
@@ -52,9 +62,11 @@ export const api = {
   reject: (incident_id: string, action_id: string) => call("POST", "/api/reject", { incident_id, action_id }),
   chaos: () => call("POST", "/api/chaos"),
   ask: (text: string, lang?: string) => call("POST", "/api/ask", { text, lang }),
+  /** Ask the AI to draft follow-up work for a fixed incident; the draft arrives as a followup.ready event. */
+  followup: (incident_id: string, kind: string) => call("POST", "/api/followup", { incident_id, kind }),
   approveComms: (incident_id: string) => call("POST", "/api/comms/approve", { incident_id }),
   replayList: () => call("GET", "/api/replay/list"),
-  replayStart: (run_id: string) => call("POST", "/api/replay/start", { run_id }),
+  replayStart: (run_id: string, speed = 1) => call("POST", "/api/replay/start", { run_id, speed }),
   replayStop: () => call("POST", "/api/replay/stop"),
   async voice(blob: Blob): Promise<ApiResult> {
     const form = new FormData();
@@ -76,10 +88,8 @@ export const api = {
     } catch { return null; }
   },
   async evalLatest(): Promise<EvalReport | null> {
-    try {
-      const r = (await transport.request("GET", "/api/eval/latest")) as EvalReport & { ok?: boolean };
-      if (!r || r.ok === false || !Array.isArray(r.rows)) return null;
-      return r;
-    } catch { return null; }
+    const r = (await call("GET", "/api/eval/latest")) as unknown as EvalReport & { ok?: boolean };
+    if (!r || r.ok === false || !Array.isArray(r.rows)) return null;
+    return r;
   },
 };

@@ -13,7 +13,7 @@ from typing import Optional
 from .util import DEPLOY_LOOKBACK_MS, DEPLOY_TOLERANCE_MS, on_path
 
 BULLETIN_TOL_MS = 30_000
-ACTION_FOR = {"deploy": ("rollback_deploy", "failover_bank"), "bank": ("failover_bank", "enable_circuit_breaker"), "business": ("notify_only",),
+ACTION_FOR = {"deploy": ("rollback_deploy",), "bank": ("notify_only", "enable_circuit_breaker"), "business": ("notify_only",),
               "traffic_spike": ("scale_gateway", "enable_circuit_breaker")}
 
 
@@ -116,6 +116,8 @@ class Verifier:
         kind, ref = parse_cause(conclusion.get("cause", ""))
         res = VerifyResult()
         add = res.checks.append
+        if kind == "other":
+            add(Check("cause_supported", False, "UNKNOWN_CAUSE", "cause must be a supported, evidence-backed explanation"))
         add(self._evidence_exists(conclusion, kind, ref))
         for fn in (self._deploy_precedes_dip, self._deploy_on_failing_path, self._scope_concentration,
                    self._others_healthy, self._no_internal_cause, self._traffic_elevated,
@@ -153,6 +155,8 @@ class Verifier:
             return Check("evidence_exists", False, "MISSING_DEPLOY_EVIDENCE", f"deploy #{ref} claimed but ev_deploy_{ref} not cited")
         if kind == "bank" and not any(i in ids for i in (f"ev_bank_{ref}",)) :
             return Check("evidence_exists", False, "MISSING_BANK_EVIDENCE", f"{ref} claimed but ev_bank_{ref} not cited")
+        if kind == "traffic_spike" and "ev_metric_traffic" not in ids:
+            return Check("evidence_exists", False, "MISSING_TRAFFIC_EVIDENCE", "traffic surge claimed without traffic evidence")
         return Check("evidence_exists", True, "OK", f"{len(ids)} evidence ids resolve")
 
     def _deploy_precedes_dip(self, c, kind, ref, inc) -> Optional[Check]:
@@ -286,7 +290,39 @@ class Verifier:
                      "bulletin claims match telemetry" if not bad else "; ".join(bad))
 
     def twin_check(self, preview: dict) -> Check:
-        ok = bool(preview.get("recovers"))
-        return Check("twin_predicts_recovery", ok, "OK" if ok else "TWIN_NO_RECOVERY",
-                     f"twin predicts recovery in ~{preview.get('expected_recovery_ms', 0) // 1000}s" if ok
-                     else "twin shows this action does not restore health")
+        rp = preview.get("recovery_pct")
+        ok = bool(preview.get("recovers")) and (rp is None or rp >= 80)
+        if ok:
+            return Check("twin_predicts_recovery", True, "OK", f"twin predicts recovery in ~{preview.get('expected_recovery_ms', 0) // 1000}s")
+        why = (f"twin shows only partial recovery ({rp:.0f}%)" if rp is not None and preview.get("recovers") else
+               "twin shows this action does not restore health")
+        w = (preview.get("warnings") or [])
+        return Check("twin_predicts_recovery", False, "TWIN_NO_RECOVERY", why + (f" ({w[0]})" if w else ""))
+
+    HEADROOM_MIN_PCT = 15.0
+
+    def failover_check(self, action: dict, preview: Optional[dict], incident: dict) -> Check:
+        """failover_target_healthy: the receiving bank must be healthy and have spare capacity."""
+        p = (action or {}).get("params") or {}
+        pv = preview or {}
+        src = p.get("bank") or p.get("from_bank")
+        to = p.get("to_bank") or pv.get("target_bank")
+        if not to:
+            return Check("failover_target_healthy", False, "NO_TARGET_BANK", "no healthy target bank to send payments to")
+        if src not in ("BANK_X", "BANK_Y", "BANK_Z") or to not in ("BANK_X", "BANK_Y", "BANK_Z"):
+            return Check("failover_target_healthy", False, "UNKNOWN_BANK", "source and receiving bank must exist in payment data")
+        if to == src:
+            return Check("failover_target_healthy", False, "TARGET_IS_SOURCE", f"target {to} is the failing bank")
+        try:
+            d, _ = self._bank_delta(incident)
+        except Exception:
+            d = {}
+        if to not in d:
+            return Check("failover_target_healthy", False, "NO_BANK_DATA", "cannot verify the receiving bank is healthy")
+        if d[to] < -3:
+            return Check("failover_target_healthy", False, "TARGET_DEGRADED", f"target {to} is itself degraded ({d[to]:+.1f}pp)")
+        head = pv.get("target_headroom_pct")
+        if head is not None and head < self.HEADROOM_MIN_PCT:
+            return Check("failover_target_healthy", False, "TARGET_OVERLOAD", f"{to} would have only {head:.0f}% spare capacity (need >= {self.HEADROOM_MIN_PCT:.0f}%)")
+        return Check("failover_target_healthy", True, "OK",
+                     f"{to} healthy" + (f", ~{head:.0f}% spare capacity" if head is not None else ", spare capacity not reported by twin"))

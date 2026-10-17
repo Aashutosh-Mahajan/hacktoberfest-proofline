@@ -22,6 +22,7 @@ class Simulation:
         self.speed = 1.0
         self.running = False
         self.chaos_hidden = False
+        self.replay_run_id = None        # set by the API while a recorded run is being replayed
         self.lock = threading.RLock()
         self._thread: Optional[threading.Thread] = None
         self._stop = False
@@ -61,7 +62,8 @@ class Simulation:
         return {"scenario": None if self.chaos_hidden else (p.scenario if p.scenario != "S0" else None),
                 "running": self.running, "sim_ms": int(e.now), "speed": self.speed,
                 "fault_active": (not self.chaos_hidden) and p.scenario != "S0" and e.now >= e.f0,
-                "chaos_hidden": self.chaos_hidden}
+                "chaos_hidden": self.chaos_hidden, "replay": self.replay_run_id is not None,
+                **({"replay_run_id": self.replay_run_id} if self.replay_run_id else {})}
 
     def emit_status(self):
         self.bus.emit("sim.status", self.status(), ts=self.engine.now)

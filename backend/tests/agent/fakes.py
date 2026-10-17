@@ -123,12 +123,17 @@ class FakeWorld:
         return {"ok": True, "detail": "applied"}
 
     def preview_action(self, kind, params, horizon_s=120):
+        extra = {}
         if kind in self.previews:
             rec = self.previews[kind]
+            if isinstance(rec, dict):
+                extra, rec = rec, rec.get("recovers", True)
         else:
             rec = kind != "notify_only"
-        return {"recovers": rec, "expected_recovery_ms": 8000 if rec else 0,
-                "predicted": [[self.now_ms, 0.8], [self.now_ms + 8000, 0.99]], "baseline": [[self.now_ms, 0.8], [self.now_ms + 8000, 0.8]]}
+        out = {"recovers": rec, "expected_recovery_ms": 8000 if rec else 0,
+               "predicted": [[self.now_ms, 0.8], [self.now_ms + 8000, 0.99]], "baseline": [[self.now_ms, 0.8], [self.now_ms + 8000, 0.8]]}
+        out.update(extra)
+        return out
 
     def success_rate_now(self, window_s=30):
         if self.recovered:

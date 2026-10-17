@@ -14,6 +14,7 @@ export class WsClient {
   private closed = false;
   private queue: Envelope[] = [];
   private raf = 0;
+  private fallback = 0;
   private lastMsgAt = 0;
   private watchdog?: number;
 
@@ -40,8 +41,11 @@ export class WsClient {
   forceReconnect() { this.ws?.close(); }
 
   private connect() {
-    const since = useStore.getState().lastSeq;
-    useStore.getState().setConn(this.attempts === 0 && since === 0 ? "connecting" : "reconnecting");
+    // Always replay the whole bus ring (since=0): every snapshot fully resets the store and the agent timeline
+    // (thoughts, tool calls) is rebuilt from the replayed events that follow it.
+    const since = 0;
+    useStore.getState().beginResync();
+    useStore.getState().setConn(this.attempts === 0 && useStore.getState().snapSeq === 0 ? "connecting" : "reconnecting");
     let ws: WebSocket;
     try { ws = new WebSocket(this.urlBase + "?since=" + since); } catch { this.schedule(); return; }
     this.ws = ws;
@@ -51,7 +55,10 @@ export class WsClient {
       try {
         const env = JSON.parse(ev.data as string) as Envelope;
         this.queue.push(env);
-        if (!this.raf) this.raf = requestAnimationFrame(() => this.flush());
+        if (!this.raf) { // one store write per frame; the timer covers hidden tabs where rAF is paused
+          this.raf = requestAnimationFrame(() => this.flush());
+          this.fallback = window.setTimeout(() => this.flush(), 250);
+        }
       } catch { /* ignore malformed frame */ }
     };
     ws.onclose = () => { if (!this.closed) { useStore.getState().setConn("reconnecting"); this.schedule(); } };
@@ -59,6 +66,7 @@ export class WsClient {
   }
 
   private flush() {
+    cancelAnimationFrame(this.raf); window.clearTimeout(this.fallback);
     this.raf = 0;
     const batch = this.queue;
     this.queue = [];

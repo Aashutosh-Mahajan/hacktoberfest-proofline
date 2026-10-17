@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { CommsDraft } from "@contract";
-import { C, box, btn, h3, jsonCall } from "./ui";
+import { C, box, btn, h3 } from "./ui";
+import { api } from "../net/api";
 
 export function CommsDrafts({ incidentId, drafts, onApproved }: { incidentId: string; drafts: CommsDraft[]; onApproved?: () => void }) {
   const [lang, setLang] = useState<"en" | "hi">("en");
@@ -9,7 +10,7 @@ export function CommsDrafts({ incidentId, drafts, onApproved }: { incidentId: st
   const shown = drafts.filter((d) => d.lang === lang);
   const approve = async () => {
     setState("busy");
-    const r = await jsonCall("POST", "/api/comms/approve", { incident_id: incidentId });
+    const r = await api.approveComms(incidentId);
     if (r.ok) { setState("approved"); onApproved?.(); } else { setState("error"); setErr(r.error ?? "failed"); }
   };
   if (!drafts.length) return <div style={box}>No comms drafted yet.</div>;

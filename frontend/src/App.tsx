@@ -1,40 +1,52 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { useStore } from "./store/store";
 import { useUi } from "./lib/ui";
-import { TopBar, ControlBar, type View } from "./components/Bars";
-import { HealthChart } from "./components/HealthChart";
-import { BankTiles, DeclineDonut } from "./components/Health";
-import { AgentStepper, Hypotheses, ToolStream, VerifyBadges } from "./components/Agent";
-import { RcaCard, ProposedActionCard, EvidenceDrawer, ChaosReveal, ChaosBanner, ErrorState, SavingsCard, DemoPanel } from "./components/Outcome";
-import { EvalBoard, useEvalReport, CommsDrafts, PostmortemModal, VoiceWarRoom, ReplayControls } from "./panels";
+import { TopBar, SimulatePopover, type View } from "./components/Bars";
+import { Hero, BankTiles, WhyFailed } from "./components/Health";
+import { ActivityPanel } from "./components/Agent";
+import { RcaCard, ProposedActionCard, ResultCard, EvidenceDrawer, ChaosReveal, ChaosBanner, ErrorState, DemoPanel } from "./components/Outcome";
 
-function EvalView() {
-  const { report, loading, error, reload } = useEvalReport();
-  return (
-    <div className="page">
-      {loading && <p className="dim">Loading eval report…</p>}
-      {error && <div className="err">{error} <button className="btn" onClick={reload}>Retry</button></div>}
-      <EvalBoard report={report} />
-    </div>
-  );
+// rarely used views are split out of the initial bundle
+const EvalView = lazy(() => import("./views/EvalView"));
+const MessagesView = lazy(() => import("./views/MessagesView"));
+const AskView = lazy(() => import("./views/AskView"));
+const FollowupDrawer = lazy(() => import("./components/FollowupDrawer"));
+const PostmortemModal = lazy(() => import("./panels/PostmortemModal").then((m) => ({ default: m.PostmortemModal })));
+
+const Loading = () => <div className="page"><div className="card"><div className="skel" style={{ height: 20, width: "40%" }} /><div className="skel" style={{ height: 120, marginTop: 16 }} /></div></div>;
+
+function PostmortemLink() {
+  const has = useStore((s) => !!s.postmortem);
+  const setPm = useUi((u) => u.setPostmortem);
+  if (!has) return null;
+  return <button className="btn cardlink" onClick={() => setPm(true)}>Read the incident report</button>;
+}
+
+function PostmortemHost() {
+  const markdown = useStore((s) => s.postmortem);
+  const open = useUi((u) => u.showPostmortem);
+  const setPm = useUi((u) => u.setPostmortem);
+  if (!markdown || !open) return null;
+  return <Suspense fallback={null}><PostmortemModal markdown={markdown} open onClose={() => setPm(false)} /></Suspense>;
+}
+
+function FollowupHost() {
+  const open = useUi((u) => !!u.followupKind);
+  if (!open) return null;
+  return <Suspense fallback={null}><FollowupDrawer /></Suspense>;
 }
 
 export function App({ onReconnect = () => {} }: { onReconnect?: () => void }) {
-  const [view, setView] = useState<View>("command");
+  const [view, setView] = useState<View>("live");
+  const [simOpen, setSimOpen] = useState(false);
   const toggleDemo = useUi((u) => u.toggleDemo);
-  const incident = useStore((s) => s.incident);
-  const comms = useStore((s) => s.comms);
-  const commsApproved = useStore((s) => s.commsApproved);
-  const markComms = useStore((s) => s.markCommsApproved);
-  const postmortem = useStore((s) => s.postmortem);
-  const voice = useStore((s) => s.voice);
-  const pmOpen = useUi((u) => u.showPostmortem);
-  const setPm = useUi((u) => u.setPostmortem);
+  const toggleSim = useCallback(() => setSimOpen((o) => !o), []);
+  const closeSim = useCallback(() => setSimOpen(false), []);
 
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement)?.tagName;
-      if (e.shiftKey && e.key.toLowerCase() === "d" && tag !== "INPUT" && tag !== "TEXTAREA") toggleDemo();
+      if (e.shiftKey && e.key.toLowerCase() === "d" && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT") toggleDemo();
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
@@ -42,36 +54,35 @@ export function App({ onReconnect = () => {} }: { onReconnect?: () => void }) {
 
   return (
     <div className="app">
-      <TopBar view={view} setView={setView} />
-      <ControlBar onReplay={<ReplayControls />} />
-      {view === "eval" ? <EvalView /> : (
-        <main className="main">
-          <div className="col">
+      <TopBar view={view} setView={setView} simOpen={simOpen} toggleSim={toggleSim} />
+      {view === "live" && (
+        <main className="stage">
+          <div className="colv">
             <ChaosBanner />
-            <HealthChart />
-            <BankTiles />
-            <DeclineDonut />
-            <VoiceWarRoom items={voice} />
-          </div>
-          <div className="col">
-            <AgentStepper />
-            <Hypotheses />
-            <VerifyBadges />
-            <ToolStream />
-          </div>
-          <div className="col third">
+            <Hero />
             <RcaCard />
+          </div>
+          <div className="colv">
             <ProposedActionCard />
-            <SavingsCard />
-            {comms && incident && (
-              <CommsDrafts incidentId={incident.id} drafts={comms} onApproved={markComms} />
-            )}
-            {commsApproved && <div className="dim">Comms approved. Nothing was sent.</div>}
-            {postmortem && <button className="btn" onClick={() => setPm(true)}>Open postmortem</button>}
+            <ResultCard />
+            <ActivityPanel />
+            <PostmortemLink />
           </div>
         </main>
       )}
-      {postmortem && <PostmortemModal markdown={postmortem} open={pmOpen} onClose={() => setPm(false)} />}
+      {view === "banks" && (
+        <main className="page"><BankTiles /><WhyFailed /></main>
+      )}
+      {view !== "live" && view !== "banks" && (
+        <Suspense fallback={<Loading />}>
+          {view === "messages" && <MessagesView />}
+          {view === "ask" && <AskView />}
+          {view === "results" && <EvalView />}
+        </Suspense>
+      )}
+      {simOpen && <SimulatePopover onClose={closeSim} />}
+      <PostmortemHost />
+      <FollowupHost />
       <EvidenceDrawer />
       <ChaosReveal />
       <ErrorState />

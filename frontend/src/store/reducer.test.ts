@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Envelope, EventMap, Incident, MetricsTick, RCA } from "@contract";
-import { initialState, reduce } from "./reducer";
+import { initialState, reduce, parseVia } from "./reducer";
 
 let seq = 0;
 const ev = <T extends keyof EventMap>(type: T, data: EventMap[T], ts = 1_000 + seq * 250): Envelope => ({ v: 2, seq: ++seq, ts, type, data }) as Envelope;
@@ -27,7 +27,6 @@ describe("reducer", () => {
       recent_metrics: [{ ts: 1, m: tick() }, { ts: 2, m: tick() }], incident: inc, hypotheses: [], deploys: [], scoreboard: [{ round: 1, correct: true, scenario: "S1", agent_cause: "x" }],
       model: { backend: "scripted", name: "m", healthy: true, warm: true },
     })]);
-    expect(s.series.ts).toEqual([1, 2]);
     expect(s.agentState).toBe("triage");
     expect(s.incident?.id).toBe("INC-1");
     expect(s.chaos.scoreboard).toHaveLength(1);
@@ -63,7 +62,6 @@ describe("reducer", () => {
       ev("error", { code: "x", message: "m", recoverable: true }),
     ]);
     expect(s.sim.chaos_hidden).toBe(true);
-    expect(s.series.ts).toHaveLength(1);
     expect(s.deploys).toHaveLength(1);
     expect(s.incident?.current_success).toBe(0.4);
     expect(s.incident?.end_ts).toBe(5000);
@@ -105,5 +103,54 @@ describe("reducer", () => {
     ]);
     expect(s.thoughts).toHaveLength(0);
     expect(s.incident?.id).toBe("INC-2");
+  });
+
+  it("applies events replayed after a snapshot even though their seq is lower", () => {
+    seq = 0;
+    const snapEnv = { v: 2, seq: 50, ts: 1, type: "snapshot", data: {
+      contract_version: 2, sim: { scenario: "S1", running: true, sim_ms: 9, speed: 1, fault_active: true, chaos_hidden: false }, agent_state: "awaiting_approval",
+      recent_metrics: [], incident: inc, hypotheses: [], deploys: [], scoreboard: [], model: { backend: "ollama", name: "gemma4:e4b", healthy: true, warm: true },
+      pending_action: { incident_id: "INC-1", action: { id: "a1", kind: "rollback_deploy", params: {}, label: "l", rationale: "r" }, approval_token: "tok", expires_ts: 9e12 },
+    } } as unknown as Envelope;
+    const replay = (n: number, type: string, data: unknown): Envelope => ({ v: 2, seq: n, ts: n, type, data }) as Envelope;
+    const s = [
+      snapEnv,
+      replay(10, "agent.thought", { incident_id: "INC-1", text: "Checked deploys via gemma4:e4b" }),
+      replay(11, "agent.tool_call", { incident_id: "INC-1", call_id: "c1", tool: "bank_stats", args: {} }),
+      replay(12, "metrics.tick", tick()),
+      replay(51, "agent.thought", { incident_id: "INC-1", text: "live thought" }),
+    ].reduce(reduce, initialState());
+    expect(s.thoughts.map((t) => t.text)).toEqual(["Checked deploys", "live thought"]);
+    expect(s.thoughts[0].via).toBe("gemma4:e4b");
+    expect(s.tools).toHaveLength(1);
+    expect(s.proposal?.token).toBe("tok"); // Approve survives a reconnect
+    expect(s.tick).toBeUndefined(); // replayed ticks are ignored; the snapshot carries history
+  });
+
+  it("fully resets on a new snapshot (scenario change / reset)", () => {
+    seq = 0;
+    const s1 = run([ev("incident.opened", { incident: inc }), ev("agent.thought", { incident_id: "INC-1", text: "old" }), ev("rca.ready", { rca })]);
+    const fresh = { v: 2, seq: 1, ts: 5, type: "snapshot", data: {
+      contract_version: 2, sim: { scenario: null, running: true, sim_ms: 1, speed: 1, fault_active: false, chaos_hidden: false }, agent_state: "idle",
+      recent_metrics: [], hypotheses: [], deploys: [], scoreboard: [], model: { backend: "ollama", name: "m", healthy: true, warm: true },
+    } } as unknown as Envelope;
+    const s2 = reduce(s1, fresh);
+    expect(s2.incident).toBeUndefined();
+    expect(s2.thoughts).toHaveLength(0);
+    expect(s2.rca).toBeUndefined();
+    expect(s2.agentState).toBe("idle");
+  });
+
+  it("does not re-toast replayed errors", () => {
+    const snapEnv = { v: 2, seq: 20, ts: 1, type: "snapshot", data: { contract_version: 2, sim: { scenario: null, running: true, sim_ms: 1, speed: 1, fault_active: false, chaos_hidden: false }, agent_state: "idle", recent_metrics: [], hypotheses: [], deploys: [], scoreboard: [], model: { backend: "ollama", name: "m", healthy: true, warm: true } } } as unknown as Envelope;
+    const s = [snapEnv, { v: 2, seq: 3, ts: 1, type: "error", data: { code: "x", message: "old", recoverable: true } } as Envelope].reduce(reduce, initialState());
+    expect(s.errors).toHaveLength(0);
+  });
+});
+
+describe("parseVia", () => {
+  it("splits the model badge off thought text", () => {
+    expect(parseVia("Checking deploys via gemma4:e4b")).toEqual({ text: "Checking deploys", via: "gemma4:e4b" });
+    expect(parseVia("scope BANK_X via payment-orchestrator")).toEqual({ text: "scope BANK_X via payment-orchestrator" });
   });
 });

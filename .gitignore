@@ -8,3 +8,10 @@ eval/results/runs/
 .server.log
 .e2e.py
 .pytest_cache/
+frontend/.vite/
+frontend/.vite.log
+.vite.log
+*.vite.log
+frontend/test-results/
+frontend/playwright-report/
+backend/runs/

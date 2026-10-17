@@ -1,4 +1,4 @@
-# PRD — Proofline: the AI on-call engineer for payments that proves its answers
+# PRD — ProofLine: the AI on-call engineer for payments that proves its answers
 
 > **Event:** Hacktober Hack Day (Paytm office) · **Track:** Best Use of Google Gemma · **Model:** Gemma 4 (mandatory)
 > **Version:** 2.0 (supersedes v1) · **Companion docs:** `design.md` (architecture, contract, UI), `CLAUDE.md` (backend build rules)
@@ -25,7 +25,7 @@ Everything is split into **4 phases** (§13). Phase 2 alone is a complete, winna
 
 ## 1. One-line pitch
 
-**When payment success rates drop, Proofline investigates like a senior SRE, shows its reasoning live, proves its root cause with evidence a rules engine checks, previews the fix in a simulation, and only acts after a human says yes — all on a laptop, offline, with Gemma 4.**
+**When payment success rates drop, ProofLine investigates like a senior SRE, shows its reasoning live, proves its root cause with evidence a rules engine checks, previews the fix in a simulation, and only acts after a human says yes — all on a laptop, offline, with Gemma 4.**
 
 ## 2. Problem
 
@@ -37,7 +37,7 @@ Everything is split into **4 phases** (§13). Phase 2 alone is a complete, winna
 
 > **An AI root-cause claim is worthless unless it can be checked — and an AI fix is dangerous unless it can be previewed.**
 
-Proofline therefore enforces a three-gate pipeline:
+ProofLine therefore enforces a three-gate pipeline:
 
 1. **Evidence gate** — every claim cites evidence IDs that resolve to real records.
 2. **Logic gate** — a deterministic verifier checks timing, scope and cause/action consistency.
@@ -47,7 +47,7 @@ The model **proposes**; code **decides**; a human **approves**.
 
 ## 4. Users
 
-| User | Need | What Proofline gives them |
+| User | Need | What ProofLine gives them |
 |---|---|---|
 | On-call SRE / payments engineer (primary) | Fast, trustworthy diagnosis; safe action | Verified RCA in < 1 min, fix preview, one-click approve, voice follow-ups |
 | Engineering manager | Impact and communication | Blast radius in ₹, ₹ saved, auto-drafted stakeholder comms, postmortem |
@@ -97,7 +97,7 @@ All scenarios are deterministic given `(seed, scenario, fault_offset, severity)`
 
 ## 8. Demo flow (target: 4 minutes)
 
-1. **Healthy** (15 s): success ~99%, ₹ at risk 0, "All systems nominal. Proofline is watching."
+1. **Healthy** (15 s): success ~99%, ₹ at risk 0, "All systems nominal. ProofLine is watching."
 2. **Break: bad deploy** (S1). Chart dips within ~10 s; incident opens on its own.
 3. **Investigation live** (30 s): hypothesis cards appear; tool calls stream; cards get ruled out with one-line reasons; decline split shows 97% technical.
 4. **Verifier moment**: if the model's first claim is weak, the amber "Verifier rejected: …" row appears and the agent self-corrects. (Shown proudly.)
@@ -195,7 +195,7 @@ All scenarios are deterministic given `(seed, scenario, fault_offset, severity)`
 
 ## 12. Gemma 4 usage map (for the "Best Use of Gemma" judges)
 
-| Gemma 4 capability | Where Proofline uses it | Why it's the right fit |
+| Gemma 4 capability | Where ProofLine uses it | Why it's the right fit |
 |---|---|---|
 | Native function calling | The whole investigation loop, hypothesis updates, conclusion submission | Structured tool use is the agent's backbone |
 | Small on-device model (E4B, 4-bit) | Everything runs locally on an RTX 3050 6 GB | Payments telemetry is sensitive; on-prem/offline is a real requirement |
@@ -264,7 +264,7 @@ Stretch items → ask-about-screenshot → comms drafts → bulletin image → v
 
 ## 14. Feature → judging criteria map
 
-| Likely criterion | Proofline's answer |
+| Likely criterion | ProofLine's answer |
 |---|---|
 | Innovation | Three-gate pipeline (evidence, logic, outcome); fix preview via digital twin; verified external claims |
 | Use of Gemma | Function calling + audio + vision + multilingual, all on-device on a 6 GB GPU |
@@ -328,7 +328,7 @@ Define all of these in Phase 1 (contract-first) so the frontend can build agains
 - Exact event duration and presentation slot (tune §8 script and phase hours).
 - Does the chosen local server support Gemma 4 E4B audio on the RTX 3050 within VRAM? (Phase 3 spike.)
 - Access to a larger Gemma 4 model for the ablation (AI Studio vs cloud GPU), if network allows.
-- Final project name (Proofline is the working name).
+- Final project name (ProofLine is the working name).
 
 ## 19. Research notes & sources
 

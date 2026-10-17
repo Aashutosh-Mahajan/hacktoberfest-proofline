@@ -3,83 +3,147 @@ import type { Evidence } from "@contract";
 import { useStore } from "../store/store";
 import { useUi } from "../lib/ui";
 import { api } from "../net/api";
-import { ACTION_LABEL, SCENARIO_LABEL, confidencePct, fmtDuration, fmtPct, fmtRupees, pct } from "../lib/format";
+import { confidencePct, fmtDuration, fmtPct, fmtRupees } from "../lib/format";
+import { actionExplain, actionPlain, failoverBanks, fixInfo, plainify, SCENARIO_PLAIN } from "../lib/words";
 
+/** "What went wrong": the verified cause, the proof behind it and who is affected. */
 export function RcaCard() {
   const rca = useStore((s) => s.rca);
   const incident = useStore((s) => s.incident);
   const openEv = useUi((u) => u.openEvidence);
-  if (!rca && !incident) return (
-    <section className="panel"><h2>Root cause</h2><p className="dim" style={{ margin: 0 }}>No incident. The RCA card appears here once the verifier passes.</p></section>
-  );
+  if (!rca && !incident) return null;
   const blast = incident?.blast;
   return (
-    <section className="panel rca" aria-label="Root cause analysis">
-      <h2><span>Root cause</span>{rca?.inconclusive && <span className="badge supported">Inconclusive</span>}</h2>
+    <section className="card cause-card" aria-label="What went wrong">
+      <h2><span>What went wrong</span>{rca?.inconclusive && <span className="tag supported">Not certain</span>}</h2>
+      <p className="cap">The cause ProofLine found, and the proof behind it.</p>
       {rca ? (
         <>
-          <h3>{rca.cause_label}</h3>
-          <div className="dim mono" style={{ fontSize: 12 }}>{rca.cause} · confidence {confidencePct(rca.confidence)}%</div>
-          <div className="conf" aria-hidden><i style={{ width: confidencePct(rca.confidence) + "%" }} /></div>
-          <p style={{ margin: "4px 0" }}>{rca.summary}</p>
-          <div className="chips">{rca.evidence.map((e) => <button key={e.id} className="evchip" onClick={() => openEv(e.id)} title={e.id}><span className="dim">{e.kind}</span> {e.title}</button>)}</div>
-          {rca.ruled_out.map((r) => <div key={r.target} className="ruled">Ruled out <b>{r.target}</b>: {r.reason}</div>)}
+          <h3 title={rca.cause_label}>{plainify(rca.cause_label)}</h3>
+          <div className="conf" title={rca.cause}>
+            <span>Confidence <b className="num">{confidencePct(rca.confidence)}%</b></span>
+            <i aria-hidden="true"><b style={{ width: confidencePct(rca.confidence) + "%" }} /></i>
+          </div>
+          <p style={{ margin: "0 0 4px" }} title={rca.summary}>{rca.inconclusive ? "The available evidence does not yet confirm the cause. No automatic fix will be offered. Review the proof below or ask an engineer to investigate." : plainify(rca.summary)}</p>
+          <div className="subhead">Proof (tap to open)</div>
+          <div className="chips">{rca.evidence.map((e) => <button key={e.id} className="evchip" onClick={() => openEv(e.id)} title={e.id + " · " + e.kind}>{e.title}</button>)}</div>
+          {rca.ruled_out.map((r) => <div key={r.target} className="ruledline"><b>Not the cause:</b> {r.target}. {plainify(r.reason)}</div>)}
         </>
-      ) : <p className="dim" style={{ margin: "0 0 6px" }}>Investigating. Verified cause will appear here.</p>}
+      ) : <p className="dim" style={{ margin: 0 }}>Still looking. The answer appears here once it has been fact-checked.</p>}
       {blast && (
-        <div className="mono" style={{ marginTop: 8, fontSize: 12, borderTop: "1px solid var(--line)", paddingTop: 6 }}>
-          Blast radius: {blast.scope} · {blast.failing_pct.toFixed(1)}% failing · {blast.failed_txns.toLocaleString("en-IN")} txns · {fmtRupees(blast.paise_per_min_at_risk)}/min
+        <div className="affected" title="Blast radius">
+          <b>Who is affected</b>
+          <span>{plainify(blast.scope)}</span>
+          <span><b className="num">{blast.failing_pct.toFixed(1)}%</b> of payments failing · <b className="num">{blast.failed_txns.toLocaleString("en-IN")}</b> payments so far · <b className="num">{fmtRupees(blast.paise_per_min_at_risk)}</b> lost per minute</span>
         </div>
       )}
     </section>
   );
 }
 
+/** The one thing the operator needs to do: approve (or reject) the suggested fix. */
 export function ProposedActionCard() {
   const p = useStore((s) => s.proposal);
   const preview = useStore((s) => s.preview);
   const executed = useStore((s) => s.executed);
   const rca = useStore((s) => s.rca);
   const incident = useStore((s) => s.incident);
-  const savings = useStore((s) => s.savings);
   const markProposal = useStore((s) => s.markProposal);
-  const simMs = useStore((s) => s.tickTs);
-  if (!p && !rca?.proposed_action) return null;
+  const expired = useStore((s) => (p ? s.tickTs > p.expires_ts && p.status === "pending" : false));
+  const [confirming, setConfirming] = useState(false);
+  useEffect(() => { setConfirming(false); }, [p?.action.id]);
+  if (executed || (!p && !rca?.proposed_action)) return null;
   const a = p?.action ?? rca!.proposed_action!;
+  // Older runs may still contain a bank-transfer proposal. Never offer to execute it or claim recovery.
+  if (a.kind === "failover_bank") return (
+    <section className="card fix" aria-label="Suggested fix">
+      <h2>Suggested response</h2>
+      <h3>{actionPlain(a)}</h3>
+      <p>{actionExplain(a, a.rationale)}</p>
+      <p className="sub" role="note">Manual follow-up required. Recovery depends on the bank; no recovery time can be promised.</p>
+    </section>
+  );
   const incId = incident?.id ?? rca?.incident_id ?? "";
-  const expired = p ? simMs > p.expires_ts && p.status === "pending" : false;
   const notify = a.kind === "notify_only";
-  const rec = executed;
+  const outage = notify && /bank/i.test(rca?.cause ?? "");
+  const noAutomaticFix = notify && !/^business[:_]/i.test(rca?.cause ?? "");
+  const info = fixInfo(a as { warnings?: string[]; preview?: unknown }, preview);
+  const warnings = (info.warnings ?? []).map(plainify);
+  const rec = info.recovery_pct;
+  const partial = !notify && preview != null && (preview.recovers === false || (rec != null && rec < 95));
+  const params = Object.entries(a.params).map(([k, v]) => k + "=" + v).join("  ");
+  const title = noAutomaticFix ? "No safe automatic fix" : actionPlain(a);
+  const approve = async () => {
+    if (!p) return;
+    if (partial && !confirming) { setConfirming(true); return; }
+    markProposal("approving");
+    const r = await api.approve(incId, a.id, p.token);
+    if (!r.ok) { markProposal("pending"); setConfirming(false); }
+  };
+  const bankTo = info.target_bank ?? failoverBanks(a).to;
   return (
-    <section className="panel" aria-label="Proposed action" style={{ borderColor: p?.status === "pending" ? "var(--warn)" : undefined }}>
-      <h2><span>Proposed action</span><span className="badge open">{ACTION_LABEL[a.kind] ?? a.kind}</span></h2>
-      <div style={{ font: "700 19px 'Barlow Condensed'" }}>{a.label}</div>
-      <p style={{ margin: "2px 0 6px" }}>{a.rationale}</p>
-      <div className="mono dim" style={{ fontSize: 12 }}>{Object.entries(a.params).map(([k, v]) => k + "=" + v).join("  ")}</div>
-      <div style={{ margin: "8px 0", padding: 8, borderRadius: 4, background: "var(--panel2)" }} aria-label="Fix preview">
-        <div className="cond dim" style={{ fontSize: 12 }}>Fix preview (digital twin)</div>
-        {preview ? (
-          preview.recovers
-            ? <div>Predicted back to normal in <b className="mono">{fmtDuration(preview.expected_recovery_ms)}</b>. The dashed green line on the chart is the forecast.</div>
-            : <div>{notify ? "No technical fix to preview: infrastructure is healthy, so Proofline recommends comms." : "Twin predicts this action will not recover. Do not approve."}</div>
-        ) : <div className="dim">Waiting for the twin…</div>}
-      </div>
-      {rec ? (
-        <div className="verify pass" role="status">
-          <b>{notify ? "Notifications queued" : rec.recovered ? "Recovered" : "Not recovered"}</b>{" "}
-          {!notify && <span className="mono">predicted {fmtDuration(rec.predicted_recovery_ms)} · actual {fmtDuration(rec.actual_recovery_ms)}</span>}
-          {savings && <div>{fmtRupees(savings.saved_paise)} loss avoided vs a {Math.round(savings.assumed_manual_mttr_ms / 60000)} min manual response (assumption).</div>}
+    <section className={"card fix" + (partial ? " partial" : "")} aria-label="Suggested fix">
+      <h2><span>Suggested fix</span></h2>
+      <p className="cap">ProofLine only suggests. Nothing changes until you approve.</p>
+      <h3 title={a.kind + (params ? " · " + params : "")}>{title}</h3>
+      <p className="dim" style={{ fontSize: 14 }} title={a.rationale}>
+        {outage ? "The bank itself is down, so there is nothing safe for ProofLine to switch automatically. Contact the bank and tell merchants." : noAutomaticFix ? "No automatic change passed the safety checks. Ask an engineer to investigate and notify the people affected." : actionExplain(a, a.rationale)}
+      </p>
+      {warnings.length > 0 && (
+        <div className="caution" role="note" aria-label="Before you approve">
+          <b>Before you approve</b>
+          <ul>{warnings.map((w) => <li key={w}>{w}</li>)}</ul>
         </div>
-      ) : p?.status === "rejected" ? <div className="dim">Rejected. Nothing was executed.</div> : (
-        <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn primary" disabled={!p || p.status !== "pending" || expired}
-            onClick={async () => { if (!p) return; markProposal("approving"); const r = await api.approve(incId, a.id, p.token); if (!r.ok) markProposal("pending"); }}>
-            {p?.status === "approving" ? "Approving…" : "Approve"}
+      )}
+      <div className="predict" aria-label="Test of the fix (simulated)" title="Digital twin preview">
+        {preview ? (
+          partial ? (
+            <span><b className="warn-t">May not fully fix this.</b>{" "}
+              {rec != null ? <>The simulated test recovers only to about <b className="num">{Math.round(rec)}%</b> of normal.</> : "The simulated test says payments may not fully recover."}</span>
+          ) : preview.recovers ? (
+            <><span className="num">{fmtDuration(preview.expected_recovery_ms)}</span><span>Simulated test: payments should be back to normal in about this long{rec != null ? <>, recovering to about <b className="num">{Math.round(rec)}%</b> of normal</> : ""}. The green dashed line on the chart shows it.</span></>
+          ) : <span>{notify ? "This action only notifies people; it does not repair the payment system." : "The simulated test says this will not fix it."}</span>
+        ) : notify ? <span>{outage ? "Contact the bank and tell merchants." : "This action only notifies people; it does not change payment settings."}</span> : <span className="dim">Testing the fix in a simulation…</span>}
+      </div>
+      {info.target_headroom_pct != null && info.target_headroom_pct > 0 && bankTo && <p className="sub" style={{ margin: "-4px 0 12px" }}>{bankTo} has room for about <b className="num">{Math.round(info.target_headroom_pct)}%</b> more traffic.</p>}
+      {p?.status === "rejected" ? <p className="dim" style={{ margin: 0 }}>You rejected this. Nothing was changed.</p> : (
+        <div className="fixactions">
+          <button className={"btn big" + (partial ? "" : " primary")} disabled={!p || p.status !== "pending" || expired} onClick={approve}>
+            {p?.status === "approving" ? "Fixing…" : partial ? (confirming ? "Click again to confirm" : "Approve anyway") : notify ? "Approve and notify" : "Approve fix"}
           </button>
-          <button className="btn" disabled={!p || p.status !== "pending"}
+          <button className="btn ghost" disabled={!p || p.status !== "pending"}
             onClick={async () => { if (!p) return; const r = await api.reject(incId, a.id); if (r.ok) markProposal("rejected"); }}>Reject</button>
-          {!p && <span className="dim">Approval token not received yet.</span>}
-          {expired && <span style={{ color: "var(--warn)" }}>Token expired.</span>}
+          {!p && <span className="dim">Waiting for permission to act…</span>}
+          {expired && <span style={{ color: "var(--warn)" }}>This approval expired. A new one will be sent.</span>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** Friendly result after the fix: how fast, and how much money it saved. */
+export function ResultCard() {
+  const executed = useStore((s) => s.executed);
+  const savings = useStore((s) => s.savings);
+  const [deployed, setDeployed] = useState(false);
+  useEffect(() => { setDeployed(false); }, [executed?.action_id]);
+  if (!executed) return null;
+  const notify = executed.kind === "notify_only";
+  return (
+    <section className={"card result" + (!executed.recovered && !notify ? " bad" : "")} aria-label="Result">
+      <div className="hl" role="status">
+        {notify ? "Teams notified"
+          : executed.recovered ? <>Fixed in <span className="num">{fmtDuration(executed.actual_recovery_ms)}</span></>
+          : "The fix did not recover payments"}
+        {savings && <> · <span className="num">{fmtRupees(savings.saved_paise)}</span> saved</>}
+      </div>
+      {!notify && executed.predicted_recovery_ms != null && <p className="sub" style={{ margin: "8px 0 0" }}>The test predicted <span className="num">{fmtDuration(executed.predicted_recovery_ms)}</span>; it actually took <span className="num">{fmtDuration(executed.actual_recovery_ms)}</span>.</p>}
+      {savings && <p className="sub" style={{ margin: "4px 0 0" }} title="counterfactual_loss vs actual_loss">Compared with a {Math.round(savings.assumed_manual_mttr_ms / 60000)}-minute manual response (our assumption): loss {fmtRupees(savings.actual_loss_paise)} instead of {fmtRupees(savings.counterfactual_loss_paise)}.</p>}
+      {executed.recovered && !notify && (
+        <div className="btnrow" style={{ marginTop: 16 }}>
+          {/* UI-only confirmation; deployment is not connected to a server. */}
+          {deployed ? <span role="status">Deployed to the server</span>
+            : <button type="button" className="btn primary" onClick={() => setDeployed(true)}>Deploy to server</button>}
         </div>
       )}
     </section>
@@ -106,26 +170,26 @@ export function EvidenceDrawer() {
   const diff = typeof body?.diff === "string" ? (body.diff as string) : null;
   const lines = Array.isArray(body?.lines) ? (body!.lines as { ts?: number; service?: string; level?: string; msg?: string }[]) : null;
   return (
-    <aside className="drawer" role="dialog" aria-label="Evidence">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-        <h2 className="cond" style={{ margin: 0 }}>{ev && ev !== "loading" ? ev.title : id}</h2>
+    <aside className="drawer" role="dialog" aria-label="Proof">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 20 }}>{ev && ev !== "loading" ? ev.title : "Proof"}</h2>
         <button className="btn" onClick={close} autoFocus>Close</button>
       </div>
-      <div className="mono dim">{id}</div>
-      {ev === "loading" && <p>Loading evidence…</p>}
-      {ev === null && <div className="err" style={{ marginTop: 10 }}>Evidence {id} could not be loaded. The backend may not have it yet.</div>}
+      <div className="num sub">{id}</div>
+      {ev === "loading" && <p>Loading…</p>}
+      {ev === null && <div className="err" style={{ marginTop: 12 }}>This proof could not be loaded. The backend may not have it yet.</div>}
       {body && (
-        <div style={{ display: "grid", gap: 10, marginTop: 10 }}>
-          {rest.length > 0 && <table className="t"><tbody>{rest.map(([k, v]) => <tr key={k}><td className="dim">{k}</td><td className="mono" style={{ textAlign: "left" }}>{typeof v === "object" ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table>}
-          {diff && <pre className="diff mono">{diff.split("\n").map((l, i) => <div key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "a" : l.startsWith("-") && !l.startsWith("---") ? "d" : ""}>{l || " "}</div>)}</pre>}
-          {lines && <pre className="diff mono">{lines.map((l, i) => <div key={i} className={l.level === "ERROR" ? "d" : ""}>{l.level} {l.service}: {l.msg}</div>)}</pre>}
+        <div style={{ display: "grid", gap: 14, marginTop: 14 }}>
+          {rest.length > 0 && <table className="t"><tbody>{rest.map(([k, v]) => <tr key={k}><td className="dim">{k.replace(/_/g, " ")}</td><td className="num">{typeof v === "object" ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table>}
+          {diff && <><div className="subhead" style={{ margin: 0 }}>What the update changed</div><pre className="diff">{diff.split("\n").map((l, i) => <div key={i} className={l.startsWith("+") && !l.startsWith("+++") ? "a" : l.startsWith("-") && !l.startsWith("---") ? "d" : ""}>{l || " "}</div>)}</pre></>}
+          {lines && <><div className="subhead" style={{ margin: 0 }}>Error log lines</div><pre className="diff">{lines.map((l, i) => <div key={i} className={l.level === "ERROR" ? "d" : ""}>{l.level} {l.service}: {l.msg}</div>)}</pre></>}
           {bul && (
             <div>
-              <img src={bul.image_url} alt={`Bulletin from ${bul.extracted.bank}`} />
-              <div className="verify pass" style={bul.consistent ? undefined : { borderColor: "var(--alert)" }}>
-                <b className={bul.consistent ? "" : "amber"}>{bul.consistent ? "Consistent with telemetry" : "Contradicts telemetry"}</b>
+              <img src={bul.image_url} alt={`Status notice from ${bul.extracted.bank}`} />
+              <div className={"verify" + (bul.consistent ? "" : " amber")}>
+                <b>{bul.consistent ? "The bank's notice matches our data" : "The bank's notice does not match our data"}</b>
                 <div>{bul.detail}</div>
-                <div className="mono dim">extracted: {bul.extracted.bank} · {bul.extracted.status}</div>
+                <div className="num sub">read from the notice: {bul.extracted.bank} · {bul.extracted.status}</div>
               </div>
             </div>
           )}
@@ -144,13 +208,13 @@ export function ChaosReveal() {
   return (
     <div className="reveal" role="alertdialog" aria-label="Chaos reveal">
       <div className="card">
-        <div className="cond dim">Chaos round {r.round} · ground truth</div>
+        <div className="dim">Chaos round {r.round}: the hidden cause was</div>
         <div className={"mark " + (r.correct ? "ok" : "no")} aria-label={r.correct ? "Correct" : "Wrong"}>{r.correct ? "✓" : "✗"}</div>
-        <div style={{ font: "700 26px 'Barlow Condensed'" }}>{SCENARIO_LABEL[r.scenario] ?? r.scenario}</div>
-        <div className="mono">truth: {r.ground_truth}</div>
-        <div className="mono">agent: {r.agent_cause}</div>
-        <div className="score" style={{ margin: "12px 0" }} aria-label="Session scoreboard">{chaos.scoreboard.map((s) => <b key={s.round} className={s.correct ? "y" : "n"}>{s.correct ? "✓" : "✗"}</b>)}</div>
-        <div><button className="btn primary" onClick={() => setShown(0)} autoFocus>Continue</button></div>
+        <div style={{ font: "700 26px/1.2 'Plus Jakarta Sans'" }}>{SCENARIO_PLAIN[r.scenario] ?? r.scenario}</div>
+        <div className="sub num" style={{ marginTop: 8 }}>actual: {r.ground_truth}</div>
+        <div className="sub num">AI said: {r.agent_cause}</div>
+        <div className="score" style={{ margin: "16px 0" }} aria-label="Session scoreboard">{chaos.scoreboard.map((s) => <b key={s.round} className={s.correct ? "y" : "n"}>{s.correct ? "✓" : "✗"}</b>)}</div>
+        <div><button className="btn primary big" onClick={() => setShown(0)} autoFocus>Continue</button></div>
       </div>
     </div>
   );
@@ -160,36 +224,26 @@ export function ChaosBanner() {
   const hidden = useStore((s) => s.sim.chaos_hidden);
   const round = useStore((s) => s.chaos.round);
   if (!hidden) return null;
-  return <div className="hidden-banner" role="status">Chaos round {round}: fault hidden. Scenario name is revealed after the agent answers.</div>;
+  return <div className="hidden-banner" role="status">Chaos round {round}: the cause is hidden until ProofLine gives its answer.</div>;
 }
 
 export function ErrorState() {
   const errs = useStore((s) => s.errors);
   const dismiss = useStore((s) => s.dismissError);
+  useEffect(() => {
+    const timers = errs.filter((e) => e.recoverable).map((e) => window.setTimeout(() => dismiss(e.id), 10000));
+    return () => timers.forEach((t) => window.clearTimeout(t));
+  }, [errs, dismiss]);
   if (!errs.length) return null;
   return (
     <div className="errs" role="alert">
       {errs.slice(-3).map((e) => (
         <div key={e.id} className="err">
-          <b>{e.code}</b><span style={{ flex: 1 }}>{e.message}</span>
+          <span style={{ flex: 1 }} title={e.code}>{e.message}</span>
           <button className="btn ghost" onClick={() => dismiss(e.id)}>{e.recoverable ? "Dismiss" : "Close"}</button>
         </div>
       ))}
     </div>
-  );
-}
-
-export function SavingsCard() {
-  const s = useStore((x) => x.savings);
-  if (!s) return null;
-  return (
-    <section className="panel" aria-label="Rupees saved">
-      <h2>Impact</h2>
-      <div style={{ font: "700 34px/1 'Barlow Condensed'", color: "var(--ok)" }}>{fmtRupees(s.saved_paise)} saved</div>
-      <div className="dim mono" style={{ fontSize: 12 }}>
-        Actual loss {fmtRupees(s.actual_loss_paise)} vs {fmtRupees(s.counterfactual_loss_paise)} if the fault ran {Math.round(s.assumed_manual_mttr_ms / 60000)} min (assumed manual response)
-      </div>
-    </section>
   );
 }
 
@@ -198,16 +252,16 @@ export function DemoPanel({ onReconnect }: { onReconnect: () => void }) {
   const st = useStore();
   if (!demo) return null;
   return (
-    <aside className="panel demo" aria-label="Demo controls">
+    <aside className="card demo" aria-label="Demo controls">
       <h2>Demo controls (Shift+D)</h2>
-      <div className="mono" style={{ fontSize: 12 }}>seq {st.lastSeq} · resyncs {st.resyncs} · conn {st.conn} · v{st.contractVersion ?? "?"}</div>
-      <div style={{ display: "flex", gap: 6, margin: "6px 0", flexWrap: "wrap" }}>
+      <p className="cap num">seq {st.lastSeq} · resyncs {st.resyncs} · {st.conn} · v{st.contractVersion ?? "?"}</p>
+      <div className="btnrow">
         <button className="btn" onClick={onReconnect}>Drop socket</button>
-        <button className="btn" onClick={() => st.localReset()}>Clear UI</button>
+        <button className="btn" onClick={() => st.localReset()}>Clear screen</button>
         <button className="btn" onClick={() => st.pushError("demo", "Sample recoverable error", true)}>Test error</button>
       </div>
-      <div className="mono dim" style={{ fontSize: 11 }}>{st.eventLog.slice(-10).reverse().map((e) => <div key={e.seq}>{e.seq} {e.type}</div>)}</div>
-      <div className="mono dim" style={{ fontSize: 11 }}>tech {fmtPct(st.tick?.technical_success_rate)} · mix {st.tick ? pct(st.tick.decline_mix.technical_pct).toFixed(0) : "—"}%</div>
+      <div className="num sub" style={{ marginTop: 12 }}>{st.eventLog.slice(-8).reverse().map((e) => <div key={e.seq}>{e.seq} {e.type}</div>)}</div>
+      <div className="num sub">system success {fmtPct(st.tick?.technical_success_rate)} · system share of failures {st.tick ? st.tick.decline_mix.technical_pct.toFixed(0) : "—"}%</div>
     </aside>
   );
 }

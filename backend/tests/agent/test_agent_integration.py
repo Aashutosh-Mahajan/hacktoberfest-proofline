@@ -3,7 +3,8 @@ import time
 import pytest
 
 from fakes import FakeWorld, ListBus, T0
-from mayday.agent import Orchestrator, ScriptedGateway
+from fake_gateway import ScriptedGateway
+from mayday.agent import Orchestrator
 from mayday.agent.evidence import EvidenceStore
 from mayday.agent.verifier import Verifier
 
@@ -77,8 +78,8 @@ def approve(bus, orch):
     return p
 
 
-@pytest.mark.parametrize("scn,cause,kind", [("S1", "deploy:482", "rollback_deploy"), ("S2", "bank:BANK_X", "failover_bank"),
-                                              ("S3", "bank:BANK_X", "failover_bank"), ("S5", "business:limit_exceeded", "notify_only")])
+@pytest.mark.parametrize("scn,cause,kind", [("S1", "deploy:482", "rollback_deploy"), ("S2", "bank:BANK_X", "notify_only"),
+                                              ("S3", "bank:BANK_X", "notify_only"), ("S5", "business:limit_exceeded", "notify_only")])
 def test_scenarios_reach_verified_rca(scn, cause, kind):
     world, bus, orch = run(scn)
     p = approve(bus, orch)
@@ -142,7 +143,7 @@ def test_twin_rejection_picks_alternative_or_none():
     approve(bus, orch)
     vr = bus.of("verify.result")
     assert not vr[0]["passed"] and any(c["name"] == "twin_predicts_recovery" and not c["passed"] for c in vr[0]["checks"])
-    assert bus.of("action.proposed")[0]["action"]["kind"] == "failover_bank"
+    assert bus.of("action.proposed")[0]["action"]["kind"] == "notify_only"
 
 
 def test_token_single_use_and_binding():
@@ -274,7 +275,7 @@ def test_verifier_s3_decoy_and_s5_business():
     v, inc = _v("S3")
     bad = v.verify(_c("deploy:483", ["ev_deploy_483"], {"kind": "rollback_deploy", "params": {"number": "483"}}), inc)
     assert {"deploy_precedes_dip", "deploy_on_failing_path"} <= names(bad, False)
-    ok = v.verify(_c("bank:BANK_X", ["ev_bank_BANK_X"], {"kind": "failover_bank", "params": {"bank": "BANK_X"}}, ["deploy:483"]), inc)
+    ok = v.verify(_c("bank:BANK_X", ["ev_bank_BANK_X"], {"kind": "notify_only", "params": {}}, ["deploy:483"]), inc)
     assert ok.passed
     unruled = v.verify(_c("bank:BANK_X", ["ev_bank_BANK_X"]), inc)
     assert "no_internal_cause" in names(unruled, False)
@@ -326,7 +327,8 @@ def test_circuit_breaker_opens():
     assert g.status()["healthy"] is False
 
 
-def test_make_gateway_falls_back(monkeypatch):
+def test_make_gateway_unreachable_is_honest(monkeypatch):
     from mayday.agent import make_gateway
     monkeypatch.setenv("MAYDAY_MODEL_URL", "http://127.0.0.1:9")
-    assert make_gateway().status()["backend"] == "scripted"
+    st = make_gateway().status()
+    assert st["backend"] == "ollama" and st["healthy"] is False and "unavailable" in st["name"].lower()

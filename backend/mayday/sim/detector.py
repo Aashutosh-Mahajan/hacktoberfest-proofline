@@ -1,7 +1,10 @@
 """Deterministic incident detector (PRD FR-9..11). Evaluated once per simulated second.
 
-Open rule: 5s success >= 5pp below the 5-min baseline (and 30s confirm >= 2pp below) for >= 10s.
-(The PRD's 30s window alone cannot meet the <=12s detection NFR, so a 5s window opens and the 30s window confirms.)
+Open rule: 3s success >= OPEN_PP (4pp) below the 5-min baseline, held continuously for >= HOLD_MS (4s).
+The PRD text (30s window >= 5pp for >= 10s) cannot meet its own <=12s detection NFR, because a 30s window
+needs ~10s of fault just to move 5pp. At ~320 txn/s a 3s window has sd ~0.3pp (4pp is >12 sigma), so the short
+window + short hold is statistically as safe: 0 false incidents over 10 seeds x 30 sim-minutes of S0.
+Measured detection latency (detected_ts - fault onset) is documented in tests/sim/test_detector_tuning.py.
 Close rule: 10s success within 1.5pp of the frozen baseline for 15s.
 """
 from __future__ import annotations
@@ -14,6 +17,9 @@ from mayday.core.protocols import BANKS
 from mayday.sim.engine import Engine, TICK, T0, TECH, AVG_PAISE
 from mayday.sim.telemetry import SimTelemetry
 
+OPEN_PP = 4.0          # drop (percentage points) vs baseline that arms the detector
+HOLD_MS = 4000         # how long the drop must persist continuously
+WIN_TICKS = 12         # 3 s detection window
 SVC_BY_CODE = {"TD_TIMEOUT": "payment-orchestrator", "TD_BANK_5XX": "bank-adapter", "TD_RATE_LIMITED": "gateway"}
 
 
@@ -61,6 +67,7 @@ class Detector:
         now = e.now
         ev = []
         s5 = _rate(self._win(k, 20))
+        s3 = _rate(self._win(k, WIN_TICKS))
         if self.inc is None:
             base = self._baseline(k)
             if base is None or now < self.cooldown_until:
@@ -68,11 +75,10 @@ class Detector:
                 return ev
             if self.last_baseline is not None and now - self.last_close < 360_000:
                 base = max(base, self.last_baseline)
-            s30 = _rate(self._win(k, 120))
-            if s5 <= base - 5.0 and s30 <= base - 2.0:
+            if s3 <= base - OPEN_PP:
                 if self.cond_since is None:
                     self.cond_since = now
-                if now - self.cond_since >= 10_000:
+                if now - self.cond_since >= HOLD_MS:
                     ev += self._open(base, now, s5)
             else:
                 self.cond_since = None
@@ -118,7 +124,7 @@ class Detector:
         cw = np.cumsum(w)
         cwr = np.cumsum(w * r)
         cwr2 = np.cumsum(w * r * r)
-        for j in range(5, nb - 3):
+        for j in range(5, nb - 2):
             def sse(a, b):
                 ww = cw[b - 1] - (cw[a - 1] if a else 0)
                 s1 = cwr[b - 1] - (cwr[a - 1] if a else 0)

@@ -27,6 +27,12 @@ SIGMA = np.array([0.5, 0.45, 0.45])
 P5_BASE = 0.001
 BIZ_BASE = (0.005, 0.003, 0.001)   # wrong pin, insufficient funds, limit exceeded
 GW_CAP = 480.0
+# Partner-bank capacity (tps). Baseline load is W*BASE_RATE = (128, 112, 80) tps, so utilisation is 58%/43%/38%.
+# Moving ALL of BANK_X's traffic onto BANK_Y gives 240 tps = 92% of 260; onto BANK_Z it gives 208 tps = 99% of 210.
+BANK_CAP = np.array([220.0, 260.0, 210.0])
+HEALTHY_TOL_PP = 1.5            # a failover target must have technical success within this of the reference
+OVERLOAD_START = 0.85           # utilisation where latency starts to climb
+STRESS_PER_SEV = 0.5            # partner capacity derating per unit of severity above 1 during a bank outage
 TMO_BASE = 3000.0
 AVG_PAISE = 45000
 TECH = ("TD_TIMEOUT", "TD_BANK_5XX", "TD_RATE_LIMITED")
@@ -80,13 +86,13 @@ def _faults(p: Params, f0: int) -> list:
         F.append(dict(kind="timeout", bank=0, start=f0 + 2000, ramp=3000, end=None, deploy=482, t1=max(450.0, 800.0 / max(s, 0.3))))
     if sc in ("S2", "S3"):
         F.append(dict(kind="bank", bank=0, start=f0, ramp=3000, end=f0 + 420_000, deploy=None,
-                      lat=1 + 5 * s, p5=min(0.6, 0.001 + 0.179 * s)))
+                      lat=1 + 5 * s, p5=min(0.6, 0.001 + 0.179 * s), stress=STRESS_PER_SEV * max(0.0, s - 1.0)))
     if sc == "S5":
         F.append(dict(kind="biz", start=f0, ramp=5000, end=f0 + 480_000, deploy=None, p=min(0.6, 0.2 * s)))
     if sc == "S4":
         F.append(dict(kind="traffic", start=f0, ramp=4000, end=f0 + 240_000, deploy=None, mult=1 + 2 * s))
     if sc == "S6":
-        F.append(dict(kind="bank", bank=1, start=f0 + 5000, ramp=3000, end=None, deploy=None, lat=2.0, p5=0.06))
+        F.append(dict(kind="bank", bank=1, start=f0 + 5000, ramp=3000, end=None, deploy=None, lat=2.0, p5=0.025))
     if sc == "S3":
         F.append(dict(kind="notif", start=f0 + 43_000, ramp=3000, end=None, deploy=483))
     return F
@@ -168,14 +174,22 @@ class Engine:
         lam = lam * tm
         latm *= (1 + 0.15 * (tm - 1))[:, None]
         w = np.tile(W, (nt, 1))
-        for b, ts in self.cfg["failover"].items():
-            w[:, BANKS.index(b)] *= 1 - ramp(t, ts, 5000)
-        w /= w.sum(1, keepdims=True)
+        for b, (ts, to) in self.cfg["failover"].items():
+            i, j = BANKS.index(b), BANKS.index(to)
+            moved = w[:, i] * ramp(t, ts, 5000)
+            w[:, i] -= moved
+            w[:, j] += moved
+        # partner-bank overload: utilisation = (share vs nominal share) * baseline utilisation / derating
+        rho = (w / W) * (W * BASE_RATE / BANK_CAP) / self.derate()
+        over = np.maximum(rho - OVERLOAD_START, 0.0)
+        latm = latm * (1 + 6 * over + 25 * np.maximum(rho - 1.0, 0.0))
+        prlb = np.where(rho > 1.0, np.clip(1 - 1 / np.maximum(rho, 1e-9), 0, 0.9), 0.0)
         cw = np.cumsum(w, 1)
         cap = np.full(nt, GW_CAP)
         if self.cfg["gw"] is not None:
             cap = GW_CAP * (1 + 2 * ramp(t, self.cfg["gw"], 6000))
         prl = np.clip(1 - cap / (lam / (TICK / 1000.0)), 0, 0.95)
+        prl = 1 - (1 - prl[:, None]) * (1 - prlb)          # (nt, 3): gateway limiter + per-bank overload shedding
         cb = np.zeros((nt, 3), bool)
         for b, ts in self.cfg["breaker"].items():
             cb[:, BANKS.index(b)] = t >= ts + 2000
@@ -206,7 +220,7 @@ class Engine:
             bank = (U[1] > cw[ti, 0]).astype(np.int64) + (U[1] > cw[ti, 1])
             lat = MEDIAN[bank] * latm[ti, bank] * np.exp(SIGMA[bank] * Z[0])
             paise = np.maximum(100, np.rint(np.exp(np.log(32600) + 0.8 * Z[1]))).astype(np.int64)
-            rl = U[2] < prl[ti]
+            rl = U[2] < prl[ti, bank]
             e5 = ~rl & (U[3] < p5[ti, bank])
             to = ~rl & ~e5 & (lat > tmo[ti, bank])
             ok = ~(rl | e5 | to)
@@ -328,14 +342,28 @@ class Engine:
                 self.cfg_version += 1
                 return {"ok": True, "detail": f"rolled back deploy #{d['number']} on {d['service']}"}
             if kind == "failover_bank":
-                bank = params.get("bank") or params.get("from")
-                if bank not in BANKS:
-                    return {"ok": False, "detail": f"unknown bank {bank!r}"}
-                if bank in self.cfg["failover"]:
-                    return {"ok": True, "detail": f"{bank} already failed over"}
-                self.cfg["failover"][bank] = now
+                src = params.get("from_bank") or params.get("bank") or params.get("from")
+                if src not in BANKS:
+                    return {"ok": False, "detail": f"unknown bank {src!r}"}
+                if src in self.cfg["failover"]:
+                    return {"ok": True, "detail": f"{src} already failed over to {self.cfg['failover'][src][1]}",
+                            "from_bank": src, "to_bank": self.cfg["failover"][src][1]}
+                to = params.get("to_bank") or params.get("to")
+                if to is not None and to not in BANKS:
+                    return {"ok": False, "detail": f"unknown bank {to!r}"}
+                if to is not None and to == src:
+                    return {"ok": False, "detail": "target bank must differ from the failing bank"}
+                healthy = self.failover_candidates(src)
+                if to is None:
+                    if not healthy:
+                        return {"ok": False, "detail": "no healthy bank to receive traffic"}
+                    to = healthy[0]["bank"]
+                elif to not in [h["bank"] for h in healthy]:
+                    return {"ok": False, "detail": f"{to} is not a healthy target (degraded or already failed over); no healthy bank to receive traffic"
+                            if not healthy else f"{to} is not a healthy target; healthy: {', '.join(h['bank'] for h in healthy)}"}
+                self.cfg["failover"][src] = (now, to)
                 self.cfg_version += 1
-                return {"ok": True, "detail": f"traffic for {bank} rerouted to remaining banks"}
+                return {"ok": True, "detail": f"traffic for {src} rerouted to {to}", "from_bank": src, "to_bank": to}
             if kind == "enable_circuit_breaker":
                 bank = params.get("bank")
                 if bank not in BANKS:
@@ -351,6 +379,55 @@ class Engine:
             if kind == "notify_only":
                 return {"ok": True, "detail": "stakeholders notified; no system change"}
             return {"ok": False, "detail": f"action {kind!r} not whitelisted"}
+
+    # ---------------------------------------------------------------- capacity / failover model
+    def derate(self) -> float:
+        """Partner capacity factor: a severe bank outage stresses the shared UPI switch (see STRESS_PER_SEV)."""
+        st = max([f.get("stress", 0.0) for f in self.faults] + [0.0])
+        return max(0.4, 1.0 - st)
+
+    def current_shares(self) -> np.ndarray:
+        """Traffic share per bank right now (failover routes applied, ramp complete)."""
+        w = W.copy()
+        for b, (ts, to) in self.cfg["failover"].items():
+            i, j = BANKS.index(b), BANKS.index(to)
+            fr = float(ramp(self.now, ts, 5000))
+            moved = w[i] * fr
+            w[i] -= moved
+            w[j] += moved
+        return w
+
+    def utilisation(self, shares=None) -> np.ndarray:
+        w = self.current_shares() if shares is None else shares
+        return (w / W) * (W * BASE_RATE / BANK_CAP) / self.derate()
+
+    def bank_tsr(self, window_ticks: int = 120) -> dict:
+        """Technical success rate (%) per bank over the recent window."""
+        a = self.sum_range(self.tick - window_ticks, self.tick)
+        out = {}
+        for i, b in enumerate(BANKS):
+            r = a[i]
+            den = int(r[0]) - int(r[5:8].sum())
+            out[b] = 100.0 * r[1] / den if den > 0 else self.ref_tsr
+        return out
+
+    def failover_candidates(self, src: str) -> list:
+        """Healthy banks that could receive src's traffic, best first (lowest projected utilisation)."""
+        tsr = self.bank_tsr()
+        shares = self.current_shares()
+        out = []
+        for j, b in enumerate(BANKS):
+            if b == src or b in self.cfg["failover"]:
+                continue
+            if tsr[b] < self.ref_tsr - HEALTHY_TOL_PP:
+                continue
+            sh = shares.copy()
+            sh[j] += sh[BANKS.index(src)]
+            sh[BANKS.index(src)] = 0.0
+            out.append({"bank": b, "tsr": tsr[b], "util_before": float(self.utilisation(shares)[j]),
+                        "util_after": float(self.utilisation(sh)[j])})
+        out.sort(key=lambda x: x["util_after"])
+        return out
 
     # ---------------------------------------------------------------- fork
     def fork(self, keep_ticks: int = 1600, headroom: int = 700) -> "Engine":

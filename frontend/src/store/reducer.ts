@@ -1,24 +1,27 @@
-import type { Envelope, EventMap, Hypothesis, MetricsTick } from "@contract";
-import { pct } from "../lib/format";
-import type { AppState, Series4Hz, ToolCallItem } from "./types";
+import type { Envelope, EventMap, Hypothesis, ProposedAction } from "@contract";
+import type { AppState, FollowupItem, ToolCallItem } from "./types";
 
-export const SERIES_CAP = 960; // 4 minutes @ 4 Hz
+/** If thought text carries "via gemma4:e4b" (or "via scripted"), split it into a badge. Optional. */
+export function parseVia(text: string): { text: string; via?: string } {
+  const m = /\s*[(\[]?\bvia (gemma[\w:.\-]*|scripted)\b[)\]]?/i.exec(text);
+  if (!m) return { text };
+  return { text: (text.slice(0, m.index) + text.slice(m.index + m[0].length)).replace(/\s+([.,;:])/g, "$1").trim(), via: m[1].toLowerCase() };
+}
+
 export const LOG_CAP = 60;
 
-const emptySeries = (): Series4Hz => ({ ts: [], overall: [], technical: [], X: [], Y: [], Z: [] });
 
 export function initialState(): AppState {
   return {
-    conn: "connecting", lastSeq: 0, resyncs: 0,
+    conn: "connecting", lastSeq: 0, snapSeq: 0, resyncs: 0,
     sim: { scenario: null, running: false, sim_ms: 0, speed: 1, fault_active: false, chaos_hidden: false },
     agentState: "idle",
-    model: { backend: "scripted", name: "—", healthy: false, warm: false },
+    model: { backend: "ollama", name: "—", healthy: false, warm: false }, models: [], modelChoice: null, modelSwitching: false,
     tickTs: 0,
-    series: emptySeries(),
     deploys: [],
     hypotheses: [], thoughts: [], tools: [], verifies: [],
     totalSavedPaise: 0, savedByIncident: {},
-    commsApproved: false,
+    commsApproved: false, followups: [], followupBusy: {},
     voice: [],
     chaos: { armed: false, round: 0, scoreboard: [] },
     errors: [], eventLog: [], nextId: 1,
@@ -29,23 +32,8 @@ export function initialState(): AppState {
 const incidentScoped = (): Partial<AppState> => ({
   incident: undefined, closedIncident: undefined, hypotheses: [], thoughts: [], tools: [], verifies: [],
   rca: undefined, preview: undefined, proposal: undefined, executed: undefined, savings: undefined,
-  comms: undefined, commsApproved: false, postmortem: undefined, agentNote: undefined,
+  comms: undefined, commsApproved: false, followups: [], followupBusy: {}, postmortem: undefined, agentNote: undefined,
 });
-
-function pushTick(series: Series4Hz, ts: number, m: MetricsTick): Series4Hz {
-  const n = series.ts.length;
-  if (n && ts <= series.ts[n - 1]) {
-    if (ts < series.ts[n - 1] - 5000) series = emptySeries(); // clock went backwards: new run
-    else return series;
-  }
-  const bank = (b: "BANK_X" | "BANK_Y" | "BANK_Z") => pct(m.by_bank?.[b]?.success_rate);
-  const cap = (a: number[], v: number) => (a.length >= SERIES_CAP ? [...a.slice(a.length - SERIES_CAP + 1), v] : [...a, v]);
-  return {
-    ts: cap(series.ts, ts), overall: cap(series.overall, pct(m.success_rate)),
-    technical: cap(series.technical, pct(m.technical_success_rate)),
-    X: cap(series.X, bank("BANK_X")), Y: cap(series.Y, bank("BANK_Y")), Z: cap(series.Z, bank("BANK_Z")),
-  };
-}
 
 function upsertHyp(list: Hypothesis[], h: Hypothesis): Hypothesis[] {
   const i = list.findIndex((x) => x.id === h.id);
@@ -65,8 +53,12 @@ const sumSaved = (m: Record<string, number>) => Object.values(m).reduce((a, b) =
 export function reduce(state: AppState, env: Envelope): AppState {
   if (!env || typeof env.type !== "string") return state;
   const seq = typeof env.seq === "number" ? env.seq : state.lastSeq;
-  // Drop already-applied duplicates (resume overlap), but never drop a snapshot.
+  // Drop already-applied duplicates, but never drop a snapshot. After a snapshot lastSeq is reset to 0 so the
+  // replayed events (seq <= snapshot seq) that follow it are applied in order.
   if (env.type !== "snapshot" && seq > 0 && seq <= state.lastSeq) return state;
+  // the bus ring can contain older snapshots; after the head snapshot of this connection they must not reset us again
+  if (env.type === "snapshot" && state.snapSeq > 0 && seq <= state.snapSeq) return state;
+  const replaying = env.type !== "snapshot" && state.snapSeq > 0 && seq <= state.snapSeq;
 
   let s: AppState = { ...state, lastSeq: Math.max(state.lastSeq, seq) };
   if (env.type !== "metrics.tick" && env.type !== "snapshot") {
@@ -77,35 +69,37 @@ export function reduce(state: AppState, env: Envelope): AppState {
   switch (env.type) {
     case "snapshot": {
       const x = d as EventMap["snapshot"];
-      const sameIncident = !!x.incident && x.incident.id === state.incident?.id;
-      let series = emptySeries();
-      for (const r of x.recent_metrics ?? []) series = pushTick(series, r.ts, r.m);
       const last = x.recent_metrics?.[x.recent_metrics.length - 1];
+      const p = (x as { pending_action?: { incident_id?: string; action: ProposedAction; approval_token: string; expires_ts: number } }).pending_action;
+      // Full reset: the sim clock may have jumped back and the bus ring was cleared. Everything incident-scoped
+      // (thoughts, tools, savings, comms...) is rebuilt from the events replayed after the snapshot.
       s = {
-        ...s,
-        ...(sameIncident ? {} : incidentScoped()),
-        // a snapshot may carry a lower seq than we hold (server restarted): trust it
-        lastSeq: seq > 0 ? seq : state.lastSeq,
+        ...initialState(),
+        conn: state.conn, resyncs: state.resyncs + 1, errors: state.errors, nextId: state.nextId, voice: [],
+        eventLog: s.eventLog, lastSeq: 0, snapSeq: seq,
         contractVersion: x.contract_version,
-        sim: x.sim, agentState: x.agent_state, model: x.model,
-        series, tick: last?.m ?? state.tick, tickTs: last?.ts ?? state.tickTs,
+        sim: x.sim, agentState: x.agent_state, model: x.model, models: state.models, modelChoice: state.modelChoice, modelSwitching: state.modelSwitching,
+        tick: last?.m, tickTs: last?.ts ?? 0,
         incident: x.incident,
         hypotheses: x.hypotheses ?? [],
-        rca: x.rca ?? (sameIncident ? state.rca : undefined),
+        rca: x.rca,
         deploys: x.deploys ?? [],
-        chaos: { ...state.chaos, scoreboard: x.scoreboard ?? [], armed: state.chaos.armed && !!x.sim?.chaos_hidden },
-        resyncs: state.resyncs + 1,
+        followups: ((x as { followups?: FollowupItem[] }).followups ?? []).filter((f) => f && f.kind),
+        proposal: p ? { action: p.action, token: p.approval_token, expires_ts: p.expires_ts, status: "pending" } : undefined,
+        chaos: { armed: !!x.sim?.chaos_hidden, round: state.chaos.round, scoreboard: x.scoreboard ?? [] },
       };
       return s;
     }
     case "sim.status": {
       const x = d as EventMap["sim.status"];
+      if (replaying) return s; // the snapshot already carries the latest sim status
       const rewound = state.sim.sim_ms > 0 && x.sim_ms + 5000 < state.sim.sim_ms;
-      return { ...s, ...(rewound ? { ...incidentScoped(), series: emptySeries(), agentState: "idle" as const } : {}), sim: x };
+      return { ...s, ...(rewound ? { ...incidentScoped(), agentState: "idle" as const } : {}), sim: x };
     }
     case "metrics.tick": {
+      if (replaying) return s; // snapshot.recent_metrics covers history
       const x = d as EventMap["metrics.tick"];
-      return { ...s, tick: x, tickTs: env.ts, series: pushTick(s.series, env.ts, x) };
+      return { ...s, tick: x, tickTs: env.ts };
     }
     case "deploy.event":
       return { ...s, deploys: upsertDeploy(s.deploys, d as EventMap["deploy.event"]) };
@@ -130,12 +124,13 @@ export function reduce(state: AppState, env: Envelope): AppState {
     case "agent.thought": {
       const x = d as EventMap["agent.thought"];
       const id = s.nextId;
-      return { ...s, nextId: id + 1, thoughts: [...s.thoughts.slice(-79), { id, text: x.text, ts: env.ts }] };
+      const v = parseVia(x.text);
+      return { ...s, nextId: id + 1, thoughts: [...s.thoughts.slice(-79), { id, seq, text: v.text, via: v.via, ts: env.ts }] };
     }
     case "agent.tool_call": {
       const x = d as EventMap["agent.tool_call"];
       if (s.tools.some((t) => t.call_id === x.call_id)) return s;
-      const item: ToolCallItem = { call_id: x.call_id, tool: x.tool, args: x.args ?? {}, status: "running", evidence_ids: [], ts: env.ts };
+      const item: ToolCallItem = { call_id: x.call_id, tool: x.tool, args: x.args ?? {}, status: "running", evidence_ids: [], ts: env.ts, seq };
       return { ...s, tools: [...s.tools, item] };
     }
     case "agent.tool_result": {
@@ -146,7 +141,7 @@ export function reduce(state: AppState, env: Envelope): AppState {
         ...s,
         tools: exists
           ? s.tools.map((t) => (t.call_id === x.call_id ? { ...t, ...patch } : t))
-          : [...s.tools, { call_id: x.call_id, tool: x.tool, args: {}, ts: env.ts, ...patch }],
+          : [...s.tools, { call_id: x.call_id, tool: x.tool, args: {}, ts: env.ts, seq, ...patch }],
       };
     }
     case "hypothesis.update":
@@ -161,7 +156,8 @@ export function reduce(state: AppState, env: Envelope): AppState {
       return { ...s, rca: (d as EventMap["rca.ready"]).rca };
     case "twin.preview": {
       const x = d as EventMap["twin.preview"];
-      return { ...s, preview: { action_id: x.action_id, kind: x.kind, recovers: x.recovers, expected_recovery_ms: x.expected_recovery_ms, predicted: x.predicted ?? [], baseline: x.baseline ?? [] } };
+      const extra = x as typeof x & { warnings?: string[]; target_bank?: string; recovery_pct?: number; target_headroom_pct?: number };
+      return { ...s, preview: { action_id: x.action_id, kind: x.kind, recovers: x.recovers, expected_recovery_ms: x.expected_recovery_ms, predicted: x.predicted ?? [], baseline: x.baseline ?? [], warnings: extra.warnings, target_bank: extra.target_bank, recovery_pct: extra.recovery_pct, target_headroom_pct: extra.target_headroom_pct } };
     }
     case "action.proposed": {
       const x = d as EventMap["action.proposed"];
@@ -185,6 +181,12 @@ export function reduce(state: AppState, env: Envelope): AppState {
     }
     case "comms.drafted":
       return { ...s, comms: (d as EventMap["comms.drafted"]).drafts ?? [], commsApproved: false };
+    case "followup.ready" as never: {
+      const f = d as unknown as FollowupItem;
+      if (!f || !f.kind) return s;
+      const rest = s.followups.filter((x) => !(x.kind === f.kind && x.incident_id === f.incident_id));
+      return { ...s, followups: [...rest, f], followupBusy: { ...s.followupBusy, [f.kind]: false } };
+    }
     case "postmortem.ready":
       return { ...s, postmortem: (d as EventMap["postmortem.ready"]).markdown };
     case "voice.query": {
@@ -212,6 +214,7 @@ export function reduce(state: AppState, env: Envelope): AppState {
       return { ...s, chaos: { armed: false, round: x.round, revealed: x, scoreboard } };
     }
     case "error": {
+      if (replaying) return s; // historical errors must not re-toast after a reconnect
       const x = d as EventMap["error"];
       const id = s.nextId;
       return { ...s, nextId: id + 1, errors: [...s.errors.slice(-9), { id, code: x.code, message: x.message, recoverable: x.recoverable, ts: env.ts }] };

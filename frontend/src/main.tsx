@@ -2,10 +2,12 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import "./styles.css";
 import { App } from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useStore } from "./store/store";
 import { WsClient } from "./net/wsClient";
 import { setTransport } from "./net/api";
 import { MockServer } from "./dev/mockServer";
+import { startHealthPolling } from "./net/health";
 
 const params = new URLSearchParams(location.search);
 try { const th = localStorage.getItem("mayday.theme"); if (th) document.documentElement.dataset.theme = th; } catch { /* storage unavailable */ }
@@ -21,4 +23,7 @@ if (params.get("mock") === "1") {
   ws.start();
 }
 
-createRoot(document.getElementById("root")!).render(<React.StrictMode><App onReconnect={() => ws?.forceReconnect()} /></React.StrictMode>);
+(window as unknown as { __proofline: typeof useStore }).__proofline = useStore; // debug / e2e hook
+startHealthPolling();
+
+createRoot(document.getElementById("root")!).render(<React.StrictMode><ErrorBoundary><App onReconnect={() => ws?.forceReconnect()} /></ErrorBoundary></React.StrictMode>);

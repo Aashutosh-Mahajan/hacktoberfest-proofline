@@ -5,8 +5,8 @@ from mayday.api.app import build_app
 
 
 @pytest.fixture()
-def client():
-    app = build_app(autostart=False, use_agent=False)
+def client(tmp_path):
+    app = build_app(autostart=False, use_agent=False, runs_dir=tmp_path / "runs")
     with TestClient(app) as c:
         c.hub = app.state.hub
         yield c

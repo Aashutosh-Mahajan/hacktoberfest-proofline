@@ -1,136 +1,120 @@
-import { useEffect, useMemo, useRef } from "react";
-import uPlot from "uplot";
+import { memo, useEffect, useRef } from "react";
+import type uPlot from "uplot";
 import { useStore } from "../store/store";
-import { pct, fmtClock } from "../lib/format";
+import { chartBuffer, buildChartData } from "../store/chartBuffer";
+import { fmtClock } from "../lib/format";
 import { useTheme } from "../lib/theme";
 
-const WINDOW_MS = 150_000;
+export { buildChartData };
+
+const WINDOW_S = 150;
+const FORECAST_S = 45;
 
 function css(name: string): string {
   return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || "#888";
 }
 
-/** Merge predicted/baseline twin series onto the x axis. Returns x (seconds) and aligned arrays. */
-export function buildChartData(
-  s: { ts: number[]; overall: number[]; X: number[]; Y: number[]; Z: number[] },
-  preview?: { predicted: [number, number][]; baseline: [number, number][] },
-): (number | null)[][] {
-  const n = s.ts.length;
-  const lastTs = n ? s.ts[n - 1] : 0;
-  const extra = new Set<number>();
-  for (const [t] of preview?.predicted ?? []) if (t > lastTs) extra.add(t);
-  for (const [t] of preview?.baseline ?? []) if (t > lastTs) extra.add(t);
-  const ex = [...extra].sort((a, b) => a - b);
-  const xs = [...s.ts, ...ex];
-  const pad = <T,>(a: T[]) => [...a, ...ex.map(() => null)] as (T | null)[];
-  const ghost = new Array<number | null>(xs.length).fill(null);
-  const base = new Array<number | null>(xs.length).fill(null);
-  const place = (arr: (number | null)[], pts: [number, number][]) => {
-    for (const [t, v] of pts) {
-      if (t > lastTs) arr[n + ex.indexOf(t)] = pct(v);
-      else {
-        // nearest existing index at or after t
-        let lo = 0, hi = n - 1;
-        while (lo < hi) { const m = (lo + hi) >> 1; if (s.ts[m] < t) lo = m + 1; else hi = m; }
-        if (n && Math.abs(s.ts[lo] - t) < 600) arr[lo] = pct(v);
-      }
-    }
-  };
-  if (preview) { place(ghost, preview.predicted); place(base, preview.baseline); }
-  return [xs.map((t) => t / 1000), pad(s.overall), pad(s.X), pad(s.Y), pad(s.Z), ghost, base];
-}
-
-export function HealthChart() {
+/**
+ * The hero chart. History lives in `chartBuffer` (outside React); uPlot is created once per theme and fed with
+ * setData at most once per animation frame, so a 4 Hz tick stream costs one canvas repaint and zero React renders.
+ */
+function HealthChartBase() {
   const host = useRef<HTMLDivElement>(null);
   const plot = useRef<uPlot | null>(null);
-  const meta = useRef({ incStart: 0, incEnd: 0 as number | undefined, deploys: [] as { ts: number; n: number }[] });
-  const series = useStore((s) => s.series);
+  const meta = useRef({ incStart: 0, incEnd: undefined as number | undefined, deploys: [] as { ts: number; n: number }[] });
+  const previewRef = useRef<ReturnType<typeof useStore.getState>["preview"]>(undefined);
+  const raf = useRef(0);
   const preview = useStore((s) => s.preview);
-  const incident = useStore((s) => s.incident);
+  const incStart = useStore((s) => s.incident?.start_ts ?? 0);
+  const incEnd = useStore((s) => s.incident?.end_ts);
   const deploys = useStore((s) => s.deploys);
   const theme = useTheme((s) => s.theme);
 
-  const data = useMemo(() => buildChartData(series, preview), [series, preview]);
-
-  meta.current.incStart = incident?.start_ts ?? 0;
-  meta.current.incEnd = incident?.end_ts;
+  previewRef.current = preview;
+  meta.current.incStart = incStart;
+  meta.current.incEnd = incEnd;
   meta.current.deploys = deploys.map((d) => ({ ts: d.ts, n: d.number }));
 
+  const paint = useRef(() => {});
+  paint.current = () => {
+    raf.current = 0;
+    const u = plot.current;
+    const b = chartBuffer.data;
+    if (!u || !b.x.length) return;
+    const pv = previewRef.current;
+    const data = buildChartData(b, pv, chartBuffer.timeOffsetMs);
+    const lastLive = b.x[b.x.length - 1];
+    const lastData = data[0][data[0].length - 1] as number;
+    const max = Math.max(lastLive + 2, Math.min(lastData, lastLive + FORECAST_S));
+    u.setData(data as uPlot.AlignedData, false);
+    u.setScale("x", { min: max - WINDOW_S, max });
+  };
+  const schedule = () => { if (!raf.current) raf.current = requestAnimationFrame(() => paint.current()); };
+
   useEffect(() => {
+    let dead = false;
+    let ro: ResizeObserver | undefined;
+    let off: (() => void) | undefined;
     const el = host.current!;
-    const lw = parseFloat(css("--lw")) || 1.5;
-    const mk = (label: string, color: string, width = lw, dash?: number[]): uPlot.Series => ({
-      label, stroke: color, width, dash, spanGaps: false, points: { show: false },
+    void import("uplot").then(({ default: UPlot }) => {
+      if (dead) return;
+      const lw = parseFloat(css("--lw")) || 1.5;
+      const mk = (label: string, color: string, width = lw, dash?: number[]): uPlot.Series => ({
+        label, stroke: color, width, dash, spanGaps: true, points: { show: false },
+      });
+      const opts: uPlot.Options = {
+        width: el.clientWidth, height: el.clientHeight, padding: [8, 8, 0, 0],
+        cursor: { show: false }, legend: { show: false },
+        scales: { x: { time: false }, y: { range: (_u, min, max) => [Math.max(0, Math.min(min, 90) - 4), Math.max(100, max + 0.5)] } },
+        axes: [
+          { space: 90, stroke: css("--dim"), grid: { stroke: css("--line"), width: 1 }, ticks: { show: false }, values: (_u, v) => v.map((x) => fmtClock(x * 1000)), font: "12px JetBrains Mono" },
+          { stroke: css("--dim"), grid: { stroke: css("--line"), width: 1 }, ticks: { show: false }, size: 48, values: (_u, v) => v.map((x) => x + "%"), font: "12px JetBrains Mono" },
+        ],
+        series: [
+          {},
+          mk("All payments", css("--overall"), lw * 1.8), mk("BANK_X", css("--bx")), mk("BANK_Y", css("--by")), mk("BANK_Z", css("--bz")),
+          mk("Test of the fix (simulated)", css("--twin"), lw * 1.8, [6, 4]), mk("If we do nothing", css("--alert"), lw, [2, 4]),
+        ],
+        hooks: {
+          drawClear: [(u) => {
+            const { ctx } = u; const { left, top, width, height } = u.bbox;
+            const m = meta.current;
+            if (m.incStart) {
+              const x0 = u.valToPos(chartBuffer.chartTime(m.incStart), "x", true);
+              const x1 = m.incEnd ? u.valToPos(chartBuffer.chartTime(m.incEnd), "x", true) : left + width;
+              ctx.fillStyle = css("--shade");
+              ctx.fillRect(Math.max(left, x0), top, Math.max(0, Math.min(left + width, x1) - Math.max(left, x0)), height);
+            }
+          }],
+          draw: [(u) => {
+            const { ctx } = u; const { left, top, width, height } = u.bbox;
+            ctx.save(); ctx.font = "12px JetBrains Mono"; ctx.strokeStyle = css("--warn"); ctx.fillStyle = css("--warn"); ctx.setLineDash([4, 4]);
+            for (const d of meta.current.deploys) {
+              const x = u.valToPos(chartBuffer.chartTime(d.ts), "x", true);
+              if (x < left || x > left + width) continue;
+              ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
+              ctx.fillText("Update #" + d.n, x + 4, top + 14);
+            }
+            ctx.restore();
+          }],
+        },
+      };
+      const b = chartBuffer.data;
+      const u = new UPlot(opts, buildChartData(b, previewRef.current, chartBuffer.timeOffsetMs) as uPlot.AlignedData, el);
+      plot.current = u;
+      ro = new ResizeObserver(() => u.setSize({ width: el.clientWidth, height: el.clientHeight }));
+      ro.observe(el);
+      off = chartBuffer.subscribe(schedule);
+      schedule();
     });
-    const opts: uPlot.Options = {
-      width: el.clientWidth, height: el.clientHeight, padding: [8, 8, 0, 0],
-      cursor: { show: false }, legend: { show: false },
-      scales: { x: { time: false }, y: { range: (_u, min, max) => [Math.max(0, Math.min(min, 90) - 4), Math.max(100, max + 0.5)] } },
-      axes: [
-        { space: 90, stroke: css("--dim"), grid: { stroke: css("--line"), width: 0.5 }, ticks: { show: false }, values: (_u, v) => v.map((x) => fmtClock(x * 1000)), font: "11px JetBrains Mono" },
-        { stroke: css("--dim"), grid: { stroke: css("--line"), width: 0.5 }, ticks: { show: false }, size: 44, values: (_u, v) => v.map((x) => x + "%"), font: "11px JetBrains Mono" },
-      ],
-      series: [
-        {},
-        mk("Overall", css("--overall"), lw * 1.8), mk("BANK_X", css("--bx")), mk("BANK_Y", css("--by")), mk("BANK_Z", css("--bz")),
-        mk("Predicted recovery", css("--twin"), lw * 1.8, [6, 4]), mk("Without action", css("--alert"), lw, [2, 4]),
-      ],
-      hooks: {
-        drawClear: [(u) => {
-          const { ctx } = u; const { left, top, width, height } = u.bbox;
-          const m = meta.current;
-          if (m.incStart) {
-            const x0 = u.valToPos(m.incStart / 1000, "x", true);
-            const x1 = m.incEnd ? u.valToPos(m.incEnd / 1000, "x", true) : left + width;
-            ctx.fillStyle = css("--shade");
-            ctx.fillRect(Math.max(left, x0), top, Math.max(0, Math.min(left + width, x1) - Math.max(left, x0)), height);
-          }
-        }],
-        draw: [(u) => {
-          const { ctx } = u; const { left, top, width, height } = u.bbox;
-          ctx.save(); ctx.font = "11px JetBrains Mono"; ctx.strokeStyle = css("--warn"); ctx.fillStyle = css("--warn"); ctx.setLineDash([4, 4]);
-          for (const d of meta.current.deploys) {
-            const x = u.valToPos(d.ts / 1000, "x", true);
-            if (x < left || x > left + width) continue;
-            ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, top + height); ctx.stroke();
-            ctx.fillText("#" + d.n, x + 3, top + 12);
-          }
-          ctx.restore();
-        }],
-      },
-    };
-    const u = new uPlot(opts, data as uPlot.AlignedData, el);
-    plot.current = u;
-    const ro = new ResizeObserver(() => u.setSize({ width: el.clientWidth, height: el.clientHeight }));
-    ro.observe(el);
-    return () => { ro.disconnect(); u.destroy(); plot.current = null; };
+    return () => { dead = true; off?.(); ro?.disconnect(); plot.current?.destroy(); plot.current = null; cancelAnimationFrame(raf.current); raf.current = 0; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [theme]);
 
-  useEffect(() => {
-    const u = plot.current;
-    if (!u || !data[0].length) return;
-    const last = data[0][data[0].length - 1] as number;
-    const lastLive = series.ts.length ? series.ts[series.ts.length - 1] / 1000 : last;
-    const max = Math.max(last, lastLive) + 2;
-    u.setData(data as uPlot.AlignedData, false);
-    u.setScale("x", { min: lastLive - WINDOW_MS / 1000, max });
-  }, [data, series.ts]);
+  // preview / incident / deploy overlays change rarely: just repaint once
+  useEffect(() => { schedule(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [preview, incStart, incEnd, deploys]);
 
-  return (
-    <section className="panel" aria-label="Success rate chart">
-      <h2>
-        <span style={{ whiteSpace: "nowrap" }}>Success rate</span>
-        <span className="legend" style={{ textTransform: "none", letterSpacing: 0, fontFamily: "IBM Plex Sans", fontWeight: 400 }}>
-          <span><i style={{ background: "var(--overall)" }} />Overall</span>
-          <span><i style={{ background: "var(--bx)" }} />BANK_X</span>
-          <span><i style={{ background: "var(--by)" }} />BANK_Y</span>
-          <span><i style={{ background: "var(--bz)" }} />BANK_Z</span>
-          <span><i style={{ background: "var(--twin)" }} />Predicted</span>
-          <span><i style={{ background: "var(--warn)" }} />Deploy</span>
-        </span>
-      </h2>
-      <div className="chart-wrap" ref={host} role="img" aria-label="Line chart of success rate by bank over the last two and a half minutes" />
-    </section>
-  );
+  return <div className="chart-wrap" ref={host} role="img" aria-label="Line chart of the share of successful payments over the last two and a half minutes, per bank, with the simulated fix forecast" />;
 }
+
+export const HealthChart = memo(HealthChartBase);

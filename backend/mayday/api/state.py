@@ -20,6 +20,8 @@ class StateTracker:
         self.scoreboard: list = []
         self.recent: deque = deque(maxlen=480)
         self.pending = None
+        self.followups: dict = {}
+        self.replaying = False      # replayed chaos.revealed must not pollute the live scoreboard
         self.model = {"backend": "scripted", "name": "none", "healthy": False, "warm": False}
         bus.subscribe(self.on_event)
 
@@ -27,6 +29,7 @@ class StateTracker:
         with self.lock:
             self.agent_state, self.incident, self.rca, self.pending = "idle", None, None, None
             self.hyps = {}
+            self.followups = {}
             self.deploys = []
             self.recent.clear()
 
@@ -55,7 +58,9 @@ class StateTracker:
                                 "approval_token": d["approval_token"], "expires_ts": d["expires_ts"]}
             elif t in ("action.executed",):
                 self.pending = None
-            elif t == "chaos.revealed":
+            elif t == "followup.ready":
+                self.followups[(d.get("incident_id"), d.get("kind"))] = d
+            elif t == "chaos.revealed" and not self.replaying:
                 self.scoreboard.append({"round": d["round"], "correct": d["correct"], "scenario": d["scenario"],
                                         "agent_cause": d["agent_cause"]})
 
@@ -70,4 +75,6 @@ class StateTracker:
                 s["rca"] = self.rca
             if self.pending:
                 s["pending_action"] = self.pending
+            if self.followups:
+                s["followups"] = list(self.followups.values())
             return s

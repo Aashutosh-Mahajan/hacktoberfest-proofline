@@ -1,4 +1,4 @@
-"""ScriptedGateway: a deterministic offline "model". It is a pure policy over the message history: it calls
+"""TEST DOUBLE ONLY (not part of the product): ScriptedGateway, a deterministic fake "model". It is a pure policy over the message history: it calls
 tools, reads their results, and forms a hypothesis from the data via heuristics (no ground truth access).
 `wrong_first=True` makes its first conclusion deliberately wrong (e.g. blame the latest deploy) so the
 verifier-rejection -> self-correct path is demonstrable."""
@@ -9,8 +9,8 @@ import re
 import time
 from typing import Optional
 
-from .gateway import Gateway, ModelReply, ToolCall
-from .util import detect_lang, trunc
+from mayday.agent.gateway import Gateway, ModelReply, ToolCall
+from mayday.agent.util import detect_lang, trunc
 
 
 def _parse(content):
@@ -74,22 +74,22 @@ class Facts:
 
 
 class ScriptedGateway(Gateway):
-    backend = "scripted"
-    name = "mayday-scripted-v1"
+    backend = "fake"
+    name = "fake-model"
 
     def __init__(self, wrong_first: bool = False, latency_s: float = 0.0):
         self.wrong_first = wrong_first
         self.latency_s = latency_s
         self.calls = 0
 
-    def chat(self, messages, tools=None, *, think=False, timeout=30.0, on_text=None, require_tool=False) -> ModelReply:
+    def chat(self, messages, tools=None, *, think=False, timeout=30.0, on_text=None, require_tool=False, **kw) -> ModelReply:
         self.calls += 1
         if self.latency_s:
             time.sleep(self.latency_s)
         sys_c = (messages[0].get("content") or "") if messages else ""
-        if sys_c.startswith("MODE:ANSWER"):
-            return self._answer(messages)
-        return self._investigate(messages)
+        r = self._answer(messages) if sys_c.startswith("MODE:ANSWER") else self._investigate(messages)
+        r.via = "fake-model"
+        return r
 
     # ------------------------------------------------------------------ investigation
     def _tc(self, text, *calls):

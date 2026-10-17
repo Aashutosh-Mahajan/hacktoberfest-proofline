@@ -7,38 +7,38 @@ export type ConnState = "connecting" | "live" | "reconnecting" | "offline" | "mo
 
 export interface ToolCallItem {
   call_id: string; tool: string; args: Record<string, unknown>;
-  status: "running" | "ok" | "failed";
+  status: "running" | "ok" | "failed"; seq: number;
   summary?: string; evidence_ids: string[]; ms?: number; ts: number;
 }
-export interface ThoughtItem { id: number; text: string; ts: number; }
+export interface ThoughtItem { id: number; seq: number; text: string; ts: number; via?: string; }
 export interface VerifyAttempt { attempt: number; passed: boolean; checks: VerifyCheck[]; rejected_reason?: string; }
 export interface TwinPreview {
   action_id: string; kind: ActionKind; recovers: boolean; expected_recovery_ms: number; predicted: Series; baseline: Series;
+  warnings?: string[]; target_bank?: string; recovery_pct?: number; target_headroom_pct?: number;
 }
 export interface Proposal { action: ProposedAction; token: string; expires_ts: number; status: "pending" | "approving" | "rejected" | "executed"; }
 export interface Executed { action_id: string; kind: ActionKind; predicted_recovery_ms?: number; actual_recovery_ms?: number; recovered: boolean; }
 export interface Savings { actual_loss_paise: number; counterfactual_loss_paise: number; saved_paise: number; assumed_manual_mttr_ms: number; }
 export interface VoiceItem { query_id: string; transcript?: string; lang?: string; answer?: string; answer_lang?: string; evidence_ids: string[]; pending: boolean; ts: number; }
 export interface ChaosState { armed: boolean; round: number; revealed?: EventMap["chaos.revealed"]; scoreboard: ChaosScore[]; }
+export interface FollowupItem { incident_id: string; kind: string; title: string; body: string; audience: string; simulated: boolean; }
 export interface ErrorItem { id: number; code: string; message: string; recoverable: boolean; ts: number; }
-
-export interface Series4Hz {
-  ts: number[]; overall: number[]; technical: number[];
-  X: number[]; Y: number[]; Z: number[];
-}
 
 export interface AppState {
   conn: ConnState;
   lastSeq: number;
+  snapSeq: number;
   resyncs: number;
   contractVersion?: number;
   sim: SimStatus;
   agentState: AgentState;
   agentNote?: string;
   model: ModelStatus;
+  models: string[];
+  modelChoice: string | null;
+  modelSwitching: boolean;
   tick?: MetricsTick;
   tickTs: number;
-  series: Series4Hz;
   deploys: Deploy[];
   incident?: Incident;
   closedIncident?: { incident_id: string; end_ts: number; mttr_ms: number };
@@ -55,6 +55,8 @@ export interface AppState {
   savedByIncident: Record<string, number>;
   comms?: CommsDraft[];
   commsApproved: boolean;
+  followups: FollowupItem[];
+  followupBusy: Record<string, boolean>;
   postmortem?: string;
   voice: VoiceItem[];
   chaos: ChaosState;

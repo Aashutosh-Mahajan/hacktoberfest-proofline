@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
 from pathlib import Path
 import tempfile
 from typing import Optional
@@ -179,7 +180,9 @@ class SimTelemetry:
             return None
         from mayday.sim.bulletin import render_bulletin
         d = Path(tempfile.gettempdir()) / "mayday_bulletins"
-        path = d / f"{bank}_{self.e.p.scenario}_{self.e.p.seed}.png"
+        # file name must not reveal the scenario id (chaos mode hides it); key on the rendered content instead
+        key = hashlib.sha1(repr(sorted(spec.items())).encode()).hexdigest()[:10]
+        path = d / f"{bank}_{key}.png"
         if not path.exists():
             render_bulletin(bank, spec["headline"], spec["status"], spec["claimed_start_ts"] // 1000,
                             spec["claimed_end_ts"] // 1000, path)

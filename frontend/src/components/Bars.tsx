@@ -1,85 +1,122 @@
-import { useState } from "react";
+import { lazy, memo, Suspense, useEffect, useRef, useState } from "react";
 import type { Scenario } from "@contract";
 import { useStore } from "../store/store";
 import { api } from "../net/api";
 import { useTheme } from "../lib/theme";
-import { fmtPct, fmtRupees, SCENARIO_LABEL } from "../lib/format";
+import { SCENARIO_PLAIN } from "../lib/words";
+import { describeModel, switchModel } from "../net/health";
+import { useAgentBusy } from "./Agent";
+import { useHealthStatus } from "./Health";
 
-export type View = "command" | "eval";
+const ReplayControls = lazy(() => import("../panels/ReplayControls").then((m) => ({ default: m.ReplayControls })));
 
-const CONN: Record<string, { label: string; cls: string }> = {
-  live: { label: "Live", cls: "live" }, mock: { label: "Mock feed", cls: "warn" }, replay: { label: "Replay", cls: "warn" },
-  connecting: { label: "Connecting", cls: "warn" }, reconnecting: { label: "Reconnecting", cls: "warn" }, offline: { label: "Offline", cls: "bad" },
-};
+export type View = "live" | "banks" | "messages" | "ask" | "results";
+const TABS: { id: View; label: string }[] = [
+  { id: "live", label: "Live" }, { id: "banks", label: "Banks" }, { id: "messages", label: "Messages" }, { id: "ask", label: "Ask" }, { id: "results", label: "Results" },
+];
 
-export function TopBar({ view, setView }: { view: View; setView: (v: View) => void }) {
-  const tick = useStore((s) => s.tick);
+const CONN: Record<string, string> = { connecting: "Connecting…", reconnecting: "Reconnecting…", offline: "Offline", replay: "Replay" };
+
+export const TopBar = memo(function TopBar({ view, setView, simOpen, toggleSim }: { view: View; setView: (v: View) => void; simOpen: boolean; toggleSim: () => void }) {
   const conn = useStore((s) => s.conn);
-  const model = useStore((s) => s.model);
-  const saved = useStore((s) => s.totalSavedPaise);
-  const chaos = useStore((s) => s.chaos);
-  const hidden = useStore((s) => s.sim.chaos_hidden);
+  const chaosArmed = useStore((s) => s.chaos.armed || s.sim.chaos_hidden);
+  const replaying = useStore((s) => !!s.sim.replay);
   const { theme, toggle } = useTheme();
-  const atRisk = tick?.paise_failed_per_min ?? 0;
-  const sr = tick ? tick.success_rate : NaN;
-  const bad = !Number.isNaN(sr) && (sr <= 1 ? sr * 100 : sr) < 97;
-  const c = CONN[conn] ?? CONN.connecting;
-  const right = chaos.scoreboard.filter((r) => r.correct).length;
+  const status = useHealthStatus();
   return (
     <header className="top">
-      <div className="brand cond">
-        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 17h6l3-9 5 17 3-8h9" fill="none" stroke="var(--alert)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
-        MAYDAY
+      <div className="brand">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 17h6l3-9 5 17 3-8h9" fill="none" stroke="var(--accent)" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        ProofLine
       </div>
       <nav className="tabs" role="tablist" aria-label="Views">
-        <button role="tab" aria-selected={view === "command"} onClick={() => setView("command")}>Command</button>
-        <button role="tab" aria-selected={view === "eval"} onClick={() => setView("eval")}>Eval board</button>
+        {TABS.map((t) => <button key={t.id} role="tab" aria-selected={view === t.id} onClick={() => setView(t.id)}>{t.label}</button>)}
       </nav>
-      <div className="kpi"><span className="l">Success rate</span><span className={"v " + (bad ? "bad" : "good")}>{fmtPct(tick?.success_rate)}</span></div>
-      <div className="kpi"><span className="l">Technical success</span><span className="v">{fmtPct(tick?.technical_success_rate)}</span></div>
-      <div className="kpi"><span className="l">₹ at risk / min</span><span className={"v " + (atRisk > 0 && bad ? "bad" : "")}>{fmtRupees(atRisk)}</span></div>
-      <div className="kpi"><span className="l">₹ saved</span><span className="v good">{fmtRupees(saved)}</span></div>
       <div className="spacer" />
-      {chaos.scoreboard.length > 0 && (
-        <span className="chip" title="Chaos scoreboard"><span className="cond">Chaos</span> <b className="mono">{right}/{chaos.scoreboard.length}</b></span>
-      )}
-      <span className="chip" title={model.name}><span className={"dot " + (model.healthy ? "live" : "bad")} />{model.backend === "ollama" ? "Gemma" : "Scripted"}{model.warm ? " · warm" : ""}</span>
-      <span className="chip" role="status"><span className={"dot " + c.cls} />{c.label}</span>
-      <button className="btn" onClick={toggle} aria-label="Toggle projector theme" aria-pressed={theme === "projector"}>{theme === "dark" ? "Projector" : "Mission"}</button>
-      <ChaosButton armed={chaos.armed || hidden} />
+      <span className={"pill " + status.kind} role="status"><i />{status.label}</span>
+      <ModelSelect />
+      {replaying && <span className="chip" role="status"><span className="dot warn" />Replaying a recorded run<button className="link" onClick={() => void api.replayStop()}>Stop</button></span>}
+      {conn === "mock" && <span className="mockflag" role="status" title="Everything on screen comes from the in-browser mock, not a backend">MOCK DATA</span>}
+      {CONN[conn] && <span className="chip" role="status"><span className="dot warn" />{CONN[conn]}</span>}
+      <button className="btn" aria-expanded={simOpen} aria-controls="sim-pop" onClick={toggleSim}>Simulate</button>
+      <button className="btn primary" disabled={chaosArmed} onClick={() => api.chaos()} title="Starts a hidden random failure to test ProofLine">{chaosArmed ? "Chaos armed" : "Chaos"}</button>
+      <button className="btn iconbtn" onClick={toggle} aria-label="Switch to the projector theme" aria-pressed={theme === "projector"} title="Projector theme: high contrast for big screens">{theme === "dark" ? "Projector" : "Dark"}</button>
     </header>
   );
-}
+});
 
-function ChaosButton({ armed }: { armed: boolean }) {
-  return <button className="btn primary" disabled={armed} onClick={() => api.chaos()}>{armed ? "Chaos armed" : "Chaos"}</button>;
+function ModelSelect() {
+  const model = useStore((s) => s.model);
+  const models = useStore((s) => s.models);
+  const choice = useStore((s) => s.modelChoice);
+  const switching = useStore((s) => s.modelSwitching);
+  const { busy, secs } = useAgentBusy();
+  const v = describeModel(model);
+  const value = choice && models.includes(choice) ? choice : models.includes(model.name) ? model.name : models[0];
+  const thinking = busy && v.state === "ready";
+  return (
+    <span className="modelsel">
+      {models.length > 1 && (
+        <>
+          <label className="sr" htmlFor="model-select">Model</label>
+          <select id="model-select" className="btn" value={value} disabled={switching} onChange={(e) => void switchModel(e.target.value)}>
+            {models.map((n) => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </>
+      )}
+      <span className="chip" role="status" title={"Active model: " + v.name} aria-label={"Model " + v.name + " " + (thinking ? "thinking " + secs + " seconds" : v.label)}>
+        <span className={"dot " + (thinking ? "warn" : v.tone)} />
+        {models.length <= 1 && <b className="num">{v.name}</b>}
+        <span className="dim">{switching ? "switching…" : thinking ? "thinking " + secs + "s" : v.label}</span>
+      </span>
+    </span>
+  );
 }
 
 const SCENARIOS: Scenario[] = ["S1", "S2", "S3", "S5", "S4", "S6", "S0"];
 
-export function ControlBar({ onReplay }: { onReplay?: React.ReactNode }) {
+/** "Try a failure": scenario controls, chaos scoreboard and replay, tucked away until needed. */
+export function SimulatePopover({ onClose }: { onClose: () => void }) {
   const hidden = useStore((s) => s.sim.chaos_hidden);
-  const sim = useStore((s) => s.sim);
+  const speed = useStore((s) => s.sim.speed);
+  const scoreboard = useStore((s) => s.chaos.scoreboard);
   const [sc, setSc] = useState<Scenario>("S1");
   const [sev, setSev] = useState(1);
   const [off, setOff] = useState(6);
   const [busy, setBusy] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const k = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", k);
+    ref.current?.querySelector<HTMLElement>("select")?.focus();
+    return () => window.removeEventListener("keydown", k);
+  }, [onClose]);
+  const right = scoreboard.filter((r) => r.correct).length;
   return (
-    <div className="ctrl" role="toolbar" aria-label="Scenario controls">
-      <label>Scenario
+    <div className="card pop" id="sim-pop" role="dialog" aria-label="Simulate a failure" ref={ref}>
+      <div>
+        <h2>Try a failure<button className="btn ghost" onClick={onClose} aria-label="Close">Close</button></h2>
+        <p className="cap" style={{ marginBottom: 0 }}>Break the simulated payment system and watch ProofLine respond.</p>
+      </div>
+      <label className="field">What should go wrong?
         <select value={sc} onChange={(e) => setSc(e.target.value as Scenario)} disabled={hidden}>
-          {SCENARIOS.map((s) => <option key={s} value={s}>{hidden ? "Hidden" : s + " · " + SCENARIO_LABEL[s]}</option>)}
+          {SCENARIOS.map((s) => <option key={s} value={s}>{hidden ? "Hidden" : SCENARIO_PLAIN[s]}</option>)}
         </select>
       </label>
-      <label>Severity <input type="range" min={0.3} max={1} step={0.1} value={sev} onChange={(e) => setSev(+e.target.value)} disabled={hidden} aria-label="Severity" /><span className="mono">{sev.toFixed(1)}</span></label>
-      <label>Fault offset <input type="number" min={0} max={120} value={off} onChange={(e) => setOff(+e.target.value)} disabled={hidden} /> s</label>
-      <button className="btn primary" disabled={hidden || busy} onClick={async () => { setBusy(true); await api.scenario(sc, sev, off); setBusy(false); }}>Inject fault</button>
-      <button className="btn" onClick={() => api.reset()}>Reset</button>
-      <span className="spacer" />
-      {onReplay}
-      <span className="chip mono" title="Simulated clock">
-        {hidden ? "scenario hidden" : sim.scenario ? sim.scenario : "no fault"} · {sim.speed}x
-      </span>
+      <label className="field row">How bad
+        <input type="range" min={0.3} max={1} step={0.1} value={sev} onChange={(e) => setSev(+e.target.value)} disabled={hidden} aria-label="How bad" />
+        <span className="num">{sev.toFixed(1)}</span>
+      </label>
+      <label className="field row">Starts after
+        <input type="number" min={0} max={120} value={off} onChange={(e) => setOff(+e.target.value)} disabled={hidden} aria-label="Seconds until the failure starts" /> seconds
+      </label>
+      <div className="btnrow">
+        <button className="btn primary" disabled={hidden || busy} onClick={async () => { setBusy(true); await api.scenario(sc, sev, off); setBusy(false); onClose(); }}>Start failure</button>
+        <button className="btn" onClick={async () => { await api.reset(); onClose(); }}>Reset to healthy</button>
+      </div>
+      {scoreboard.length > 0 && <div className="sub">Chaos score: <b className="num">{right}/{scoreboard.length}</b> correct</div>}
+      <div className="sub num">Simulation speed {speed}x</div>
+      <Suspense fallback={<div className="sub">Loading replays…</div>}><ReplayControls /></Suspense>
     </div>
   );
 }

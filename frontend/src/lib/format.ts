@@ -1,15 +1,9 @@
-/** Formatting + unit-normalisation helpers. The wire may carry rates as fractions (0..1) or percents (0..100). */
+/** Formatting helpers. Backend rates (success_rate, *_pct, by_bank) are PERCENT (0..100). */
 
-export const pct = (v: number | undefined | null): number => {
-  if (v == null || Number.isNaN(v)) return NaN;
-  return v <= 1.0001 ? v * 100 : v;
-};
+export const pct = (v: number | undefined | null): number => (v == null || Number.isNaN(v) ? NaN : v);
 
-/** Normalise a pair that must sum to ~1 or ~100. */
-export const pctPair = (a: number, b: number): [number, number] => {
-  const sum = a + b;
-  return sum <= 1.5 ? [a * 100, b * 100] : [a, b];
-};
+/** Fraction (0..1) -> percent, for the few contract fields that are fractions (confidence, eval accuracy). */
+export const frac = (v: number | undefined | null): number => (v == null || Number.isNaN(v) ? NaN : v * 100);
 
 export const fmtPct = (v: number | undefined | null, digits = 1): string => {
   const p = pct(v);
@@ -47,7 +41,7 @@ export const fmtInt = (n: number | undefined | null): string =>
 
 export const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
-export const confidencePct = (c: number): number => Math.round(c <= 1 ? c * 100 : c);
+export const confidencePct = (c: number): number => Math.round(c <= 1 ? c * 100 : c); // confidence is 0..1 on the wire
 
 export const SCENARIO_LABEL: Record<string, string> = {
   S0: "No fault",

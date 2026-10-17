@@ -96,7 +96,7 @@ export class MockServer {
       data: {
         contract_version: 2, sim, agent_state: this.agentState, recent_metrics: this.history.slice(-480),
         incident: this.incident ?? undefined, hypotheses: [], deploys: this.deploys, scoreboard: this.scoreboard,
-        model: { backend: "scripted", name: "mock-gemma-4-e4b", healthy: true, warm: true },
+        model: this.modelStatus(),
       } satisfies EventMap["snapshot"],
     });
   }
@@ -158,17 +158,24 @@ export class MockServer {
     const tps = 820 + Math.sin(t / 5000) * 25 + (biz ? d * 90 : 0);
     const failFrac = (100 - overall) / 100;
     const bank = (b: Bank) => ({
-      success_rate: r[b] / 100,
+      success_rate: r[b],
       p95_ms: 210 + noise(t, 4) * 20 + (b === "BANK_X" && f && (f.kind === "S2" || f.kind === "S3") ? d * 1400 : 0),
       tps: tps * SHARE[b],
     });
     return {
-      success_rate: overall / 100, technical_success_rate: technical / 100,
+      success_rate: overall, technical_success_rate: technical,
       decline_mix: { technical_pct: techPct, business_pct: 100 - techPct },
       tps, p95_ms: 215 + d * (f?.kind === "S1" ? 40 : 300),
       by_bank: { BANK_X: bank("BANK_X"), BANK_Y: bank("BANK_Y"), BANK_Z: bank("BANK_Z") },
       paise_failed_per_min: Math.round(tps * 60 * failFrac * 45000 * (biz ? 0.4 : 1)),
     };
+  }
+
+  private modelName = "gemma4:e4b";
+  private modelSince = 0;
+  /** Mock Gemma "warms up" for 5 s after being selected, like the real Ollama model. */
+  private modelStatus() {
+    return { backend: "ollama" as const, name: this.modelName, healthy: true, warm: Date.now() - this.modelSince > 4000 };
   }
 
   // ---- REST --------------------------------------------------------------------------------------
@@ -179,9 +186,27 @@ export class MockServer {
     };
   }
 
+  private followup(incident_id: string, kind: string) {
+    const T: Record<string, { title: string; audience: string; body: string }> = {
+      permanent_fix: { title: "Make the fix permanent", audience: "internal", body: "## What to change\n- Add a canary step for changes to bank timeouts.\n- Add an alert when a bank's timeout rate passes 5% for 30 seconds.\n\n## Why\nThe rollback restored service, but nothing stops the same change from shipping again." },
+      followup_tasks: { title: "Follow-up tasks", audience: "internal", body: "## Checklist\n1. **Owner: payments team.** Review the change that caused the drop (due this week).\n2. **Owner: on-call.** Add the new alert to the runbook.\n3. **Owner: support.** Check that merchants were told." },
+      escalate_bank: { title: "Report to BANK_X", audience: "bank", body: "## Summary\nBetween 09:00 and 09:03 about 61% of payments routed to BANK_X failed with server errors.\n\n## What we saw\n- Error rate rose within seconds and stayed high.\n- Other banks were healthy.\n\nPlease confirm the cause and expected recovery time." },
+      merchant_notice: { title: "Message for merchants", audience: "merchant", body: "Some payments were slow or failed for a few minutes. The issue is fixed and payments are back to normal. Failed payments were not charged." },
+    };
+    const t = T[kind] ?? { title: kind, audience: "internal", body: "Draft not available in the mock." };
+    window.setTimeout(() => this.emit("followup.ready" as never, { incident_id, kind, simulated: true, ...t } as never), 1800);
+    return { ok: true };
+  }
+
   private async handle(method: string, path: string, body: Record<string, unknown>): Promise<unknown> {
     await new Promise((r) => setTimeout(r, 40));
-    if (path === "/api/health") return { ok: true, contract_version: 2, model: { backend: "scripted", name: "mock-gemma-4-e4b", healthy: true, warm: true } };
+    if (path === "/api/health") return { ok: true, contract_version: 2, models: ["gemma4:e4b", "gemma4:e2b"], active: this.modelName, model: this.modelStatus() };
+    if (path === "/api/model" && method === "POST") {
+      const m = String(body.model);
+      if (m !== "gemma4:e4b" && m !== "gemma4:e2b") return { ok: false, error: "unknown model " + m };
+      this.modelName = m; this.modelSince = Date.now();
+      return { ok: true, model: this.modelStatus() };
+    }
     if (path === "/api/scenario" && method === "POST") {
       this.chaosHidden = false;
       this.startScenario(body.scenario as Scenario, Number(body.severity ?? 1), Number(body.fault_offset_s ?? 6));
@@ -193,9 +218,10 @@ export class MockServer {
     if (path === "/api/chaos") return this.chaos();
     if (path === "/api/ask") return this.ask(String(body.text ?? ""), String(body.lang ?? "en"));
     if (path === "/api/voice") return this.ask("BANK_Y pe koi asar hua?", "hi", true);
+    if (path === "/api/followup" && method === "POST") return this.followup(String(body.incident_id), String(body.kind));
     if (path === "/api/comms/approve") { this.emit("agent.thought", { incident_id: String(body.incident_id), text: "Comms approved by operator. Nothing is sent; drafts stay in the war-room log." }); return { ok: true }; }
     if (path === "/api/eval/latest") return MOCK_EVAL;
-    if (path === "/api/replay/list") return { ok: true, runs: [{ run_id: "demo-s1-seed7", label: "S1 bad deploy (seed 7)" }, { run_id: "demo-s3-seed3", label: "S3 decoy (seed 3)" }] };
+    if (path === "/api/replay/list") return { ok: true, runs: [{ run_id: "run_s1_seed7", scenario: "S1", chaos: false, started: "2026-10-17T09:12:03Z", duration_s: 96, events: 612 }, { run_id: "run_s3_seed3", scenario: "S3", chaos: false, started: "2026-10-17T09:20:41Z", duration_s: 118, events: 744 }, { run_id: "run_chaos_2", scenario: null, chaos: true, started: "2026-10-17T09:31:10Z", duration_s: 74, events: 498 }], active: null };
     if (path === "/api/replay/start") { this.reset(); this.startScenario("S1", 1, 4); return { ok: true }; }
     if (path === "/api/replay/stop") return { ok: true };
     if (path.startsWith("/api/evidence/")) return this.evidence(decodeURIComponent(path.slice("/api/evidence/".length))) ?? { ok: false, error: "unknown evidence" };
@@ -229,7 +255,7 @@ export class MockServer {
     const S = 1000;
     let c = f + 8 * S;
     const step = (gapS: number, fn: () => void) => { c += gapS * S; this.at(c, fn); };
-    const thought = (text: string) => this.emit("agent.thought", { incident_id: incId, text });
+    const thought = (text: string) => this.emit("agent.thought", { incident_id: incId, text: text + " via " + this.modelName });
     const state = (st: EventMap["agent.state"]["state"], note?: string) => { this.agentState = st; this.emit("agent.state", { incident_id: incId, state: st, note }); };
     const hyp = (h: Hypothesis) => this.emit("hypothesis.update", { incident_id: incId, hypothesis: h });
     const tool = (tool: string, args: Record<string, unknown>, summary: string, ev: string[], ms: number, ok = true, gap = 1.2) => {
@@ -243,8 +269,8 @@ export class MockServer {
     const sev = this.fault!.severity;
     const failing = biz ? 0.088 * sev : bankOutage ? 0.61 * sev * 0.4 : 0.46 * sev * 0.4;
     const mk = (extra: Partial<Incident> = {}): Incident => ({
-      id: incId, start_ts: f, detected_ts: f + 8 * S, baseline_success: 0.992,
-      current_success: 0.992 - failing,
+      id: incId, start_ts: f, detected_ts: f + 8 * S, baseline_success: 99.2,
+      current_success: 99.2 - failing * 100,
       decline_breakdown: biz
         ? { technical_pct: 6, business_pct: 94, top_codes: [{ code: "BD_LIMIT_EXCEEDED", pct: 81 }, { code: "BD_INSUFFICIENT_FUNDS", pct: 9 }, { code: "BD_WRONG_PIN", pct: 4 }] }
         : { technical_pct: 97, business_pct: 3, top_codes: [{ code: kind === "S1" ? "TD_TIMEOUT" : "TD_BANK_5XX", pct: 71 }, { code: "TD_TIMEOUT", pct: 22 }, { code: "BD_WRONG_PIN", pct: 2 }] },
@@ -389,7 +415,8 @@ export class MockServer {
       ? { id: actionId, kind: "notify_only", params: { channel: "merchant+support" }, label: "Notify merchants and support", rationale: "Nothing is broken. Users hit daily limits during the cashback campaign; warn them instead of rolling anything back." }
       : kind === "S1"
         ? { id: actionId, kind: "rollback_deploy", params: { deploy_id: "482", service: "payment-orchestrator" }, label: "Roll back #482", rationale: "Restores BANK_X timeout to 3000 ms. Rollback is idempotent." }
-        : { id: actionId, kind: "failover_bank", params: { from: "BANK_X", to: "BANK_Y" }, label: "Fail over BANK_X to BANK_Y", rationale: "Route BANK_X traffic via BANK_Y until the bank recovers. Reversible." };
+        : { id: actionId, kind: "failover_bank", params: { from_bank: "BANK_X", to_bank: "BANK_Y", bank: "BANK_X" }, label: "Fail over BANK_X to BANK_Y", rationale: "Route BANK_X traffic via BANK_Y until the bank recovers. Reversible.",
+          warnings: kind === "S3" ? ["BANK_Y would run at 103% of capacity", "This works around the problem; BANK_X is still down"] : ["BANK_Y would run at 92% of capacity", "This works around the problem; BANK_X is still down"] } as EventMap["action.proposed"]["action"];
     const cause = biz ? "business:limit_exceeded" : kind === "S1" ? "deploy:482" : "bank:BANK_X";
     const evidence: EventMap["rca.ready"]["rca"]["evidence"] = biz
       ? [{ id: "ev_breakdown_1", kind: "breakdown", title: "Decline mix: 94% business" }, { id: "ev_deploy_none", kind: "deploy", title: "No deploys on payment path" }]
@@ -429,10 +456,10 @@ export class MockServer {
         saved.recoverAt = keep;
         const rp = this.bankRates(t, biz ? this.damage(t) : dp);
         const rb = this.bankRates(t);
-        const ov = (r: Record<Bank, number>) => (Object.keys(SHARE) as Bank[]).reduce((a, b) => a + SHARE[b] * r[b], 0) / 100;
+        const ov = (r: Record<Bank, number>) => (Object.keys(SHARE) as Bank[]).reduce((a, b) => a + SHARE[b] * r[b], 0);
         predicted.push([t, ov(rp)]); baseline.push([t, ov(rb)]);
       }
-      this.emit("twin.preview", { incident_id: incId, action_id: actionId, kind: action.kind, recovers: !biz, expected_recovery_ms: biz ? 0 : 8000, predicted: biz ? baseline : predicted, baseline });
+      this.emit("twin.preview", { incident_id: incId, action_id: actionId, kind: action.kind, recovers: !biz && kind !== "S3", expected_recovery_ms: biz ? 0 : 8000, predicted: biz ? baseline : predicted, baseline, ...(action.kind === "failover_bank" ? { target_bank: "BANK_Y", recovery_pct: kind === "S3" ? 78 : 97, target_headroom_pct: kind === "S3" ? -3 : 8 } : {}) } as EventMap["twin.preview"]);
     });
     step(0.6, () => {
       state("proposing");
@@ -522,7 +549,7 @@ export class MockServer {
     let ans: string;
     if (mentionsY) ans = hi ? "BANK_Y pe koi asar nahi hua. Success rate 99.1% hai. Dikkat sirf BANK_X pe hai." : "BANK_Y is not affected: success rate is 99.1%. The failures are isolated to BANK_X.";
     else if (faultOn) ans = hi ? "Abhi ek incident chal raha hai. Verified cause investigation ke baad RCA card mein dikhega." : "An incident is in progress. The verified cause will appear on the RCA card once the verifier passes.";
-    else ans = hi ? "Abhi sab systems normal hain. Proofline nazar rakh raha hai." : "All systems nominal. Proofline is watching.";
+    else ans = hi ? "Abhi sab systems normal hain. ProofLine nazar rakh raha hai." : "All systems nominal. ProofLine is watching.";
     window.setTimeout(() => this.emit("voice.answer", { query_id: qid, text: ans, lang: hi ? "hi" : "en", evidence_ids: mentionsY ? ["ev_metric_bank"] : [] }), 900 / this.speed);
     return { ok: true, query_id: qid };
   }
@@ -607,8 +634,8 @@ const MOCK_EVAL: EvalReport & { ok: true } = {
     { scenario: "S0", runs: 12, accuracy: 1, median_rca_s: 0, p90_rca_s: 0, mean_tool_calls: 0, verifier_rejection_rate: 0, twin_error_s: 0 },
     { scenario: "S1", runs: 30, accuracy: 0.97, median_rca_s: 41, p90_rca_s: 58, mean_tool_calls: 6.2, verifier_rejection_rate: 0.27, twin_error_s: 1.1 },
     { scenario: "S2", runs: 30, accuracy: 0.93, median_rca_s: 44, p90_rca_s: 63, mean_tool_calls: 6.8, verifier_rejection_rate: 0.17, twin_error_s: 1.4 },
-    { scenario: "S3", runs: 30, accuracy: 0.9, decoy_cleared_pct: 0.93, median_rca_s: 52, p90_rca_s: 74, mean_tool_calls: 7.9, verifier_rejection_rate: 0.43, twin_error_s: 1.3 },
-    { scenario: "S5", runs: 30, accuracy: 0.97, correctly_not_remediated_pct: 1, median_rca_s: 36, p90_rca_s: 51, mean_tool_calls: 5.4, verifier_rejection_rate: 0.2, twin_error_s: 0 },
+    { scenario: "S3", runs: 30, accuracy: 0.9, decoy_cleared_pct: 93, median_rca_s: 52, p90_rca_s: 74, mean_tool_calls: 7.9, verifier_rejection_rate: 0.43, twin_error_s: 1.3 },
+    { scenario: "S5", runs: 30, accuracy: 0.97, correctly_not_remediated_pct: 100, median_rca_s: 36, p90_rca_s: 51, mean_tool_calls: 5.4, verifier_rejection_rate: 0.2, twin_error_s: 0 },
   ],
   ablations: [
     { name: "Full pipeline (E4B + verifier)", accuracy: 0.94, runs: 120 },

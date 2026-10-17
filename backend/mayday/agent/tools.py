@@ -56,6 +56,34 @@ def specs(names) -> list:
     return [s for s in TOOL_SPECS if s["function"]["name"] in names]
 
 
+def _slim(name, desc, props, required=()):
+    return {"type": "function", "function": {"name": name, "description": desc, "parameters": {
+        "type": "object", "properties": props, "required": list(required)}}}
+
+
+_S, _I = {"type": "string"}, {"type": "integer"}
+# Tiny schemas for small local models (every token counts on CPU). Only the tools Gemma needs; the rest stay callable.
+SLIM_SPECS = {
+    "decline_breakdown": _slim("decline_breakdown", "technical vs business declines", {"by": {"type": "string", "enum": ["bank", "code"]}}),
+    "bank_stats": _slim("bank_stats", "per-bank success vs baseline", {}),
+    "list_deploys": _slim("list_deploys", "recent deploys vs dip timing", {}),
+    "traffic": _slim("traffic", "traffic vs baseline", {}),
+    "query_logs": _slim("query_logs", "failure logs", {"bank": _S, "code": _S}),
+    "read_bulletin": _slim("read_bulletin", "read bank status bulletin image", {"bank": _S}, ["bank"]),
+    "get_deploy": _slim("get_deploy", "deploy diff", {"deploy_id": _S}, ["deploy_id"]),
+    "submit_conclusion": _slim("submit_conclusion", "final root cause for verification", {
+        "cause": {"type": "string", "description": "deploy:<n>|bank:<BANK>|business:<code>|traffic_spike|inconclusive"},
+        "confidence": {"type": "number"}, "evidence_ids": {"type": "array", "items": _S},
+        "ruled_out": {"type": "array", "items": {"type": "object", "properties": {"target": _S, "reason": _S}}},
+        "action": {"type": "string", "description": "rollback_deploy|failover_bank|notify_only|enable_circuit_breaker|scale_gateway"},
+        "summary": _S}, ["cause", "confidence", "evidence_ids", "ruled_out", "action", "summary"]),
+}
+
+
+def slim_specs(names) -> list:
+    return [SLIM_SPECS[n] for n in SLIM_SPECS if n in names]
+
+
 @dataclass
 class ToolResult:
     ok: bool
@@ -162,7 +190,8 @@ class Toolbox:
     def _deploy_row(self, d, start):
         t = round((d["ts"] - start) / 1000)
         return {"id": d["id"], "number": d["number"], "service": d["service"], "t_vs_dip_s": t,
-                "before_dip": t <= 15, "on_path": on_path(d["service"]), "summary": trunc(d.get("summary", ""), 80)}
+                "before_dip": t <= 15, "on_path": on_path(d["service"]), "summary": trunc(d.get("summary", ""), 80),
+                "banks": sorted(set(re.findall(r"BANK_[XYZ]", d.get("diff", "") + d.get("summary", ""))))}
 
     def _register_deploy(self, d, start):
         body = dict(d)
@@ -204,20 +233,26 @@ class Toolbox:
         return data, f"traffic {data['ratio']}x baseline", [eid]
 
     def t_read_bulletin(self, bank):
+        b = str(bank or "").strip().upper().replace(" ", "_")
+        bank = b if b.startswith("BANK_") else ("BANK_" + b if b in ("X", "Y", "Z") else b)
         info = self.tel.read_bulletin(bank)
         if not info:
             return {"available": False}, f"no bulletin for {bank}", []
-        ex = None
+        ex, note = None, "from bulletin metadata"
         if self.gateway is not None:
             try:
-                ex = self.gateway.extract_bulletin(info, bank)
-            except Exception:
-                ex = None
+                if hasattr(self.gateway, "read_bulletin"):
+                    ex, note = self.gateway.read_bulletin(info, bank, self.tel.now())
+                else:
+                    ex = self.gateway.extract_bulletin(info, bank)
+            except Exception as e:
+                ex, note = None, f"model read failed ({trunc(e, 60)}); used bulletin metadata"
         ex = ex or info.get("extracted")
         if not ex:
             raise ValueError("bulletin unreadable")
         from .verifier import bulletin_consistency
         ok, detail = bulletin_consistency(ex, self.tel.bulletin_truth_window(bank), self.tel.now())
+        detail = f"{detail} [{note}]"
         b = {"image_url": info.get("image_url", ""), "extracted": ex, "consistent": ok, "detail": detail}
         eid = self.store.register(f"ev_bulletin_{bank}", "bulletin", f"{bank} status bulletin", {"bulletin": b},
                                   ts=ex.get("claimed_start_ts"))
