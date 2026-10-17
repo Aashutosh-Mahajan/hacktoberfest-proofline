@@ -27,10 +27,15 @@ test("S1 bad deploy end to end", async ({ page }) => {
   await expect(page.getByRole("status").filter({ hasText: /Fixed in/ })).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/saved/).first()).toBeVisible();
   await expect(page.getByRole("status").filter({ hasText: "All good" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Next steps" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Deploy to server" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Deployed to the server" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Deploy to server" })).toHaveCount(0);
+  await page.screenshot({ path: "test-results/dashboard-desktop.png", fullPage: true });
 
   // secondary views load lazily
-  await page.getByRole("tab", { name: "Results" }).click();
-  await expect(page.getByText("How well does ProofLine do?")).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Results" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Messages" })).toHaveCount(0);
   await page.getByRole("tab", { name: "Banks" }).click();
   await expect(page.getByText("Why payments failed")).toBeVisible();
 

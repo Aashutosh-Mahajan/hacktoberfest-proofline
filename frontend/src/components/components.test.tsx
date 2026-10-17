@@ -37,6 +37,17 @@ describe("RcaCard", () => {
 });
 
 describe("ProposedActionCard", () => {
+  it("provides concrete next steps when surge diagnosis cannot be verified", () => {
+    useStore.setState({ agentState: "inconclusive", rca: { ...rca, cause: "inconclusive", inconclusive: true },
+      incident: { id: "inc_1", start_ts: 1, detected_ts: 2, baseline_success: 99, current_success: 50,
+        decline_breakdown: { technical_pct: 99, business_pct: 1, top_codes: [{ code: "TD_RATE_LIMITED", pct: 98 }] },
+        blast: { scope: "all banks", failing_pct: 49, failed_txns: 100, paise_per_min_at_risk: 1000 } } });
+    render(<ProposedActionCard />);
+    expect(screen.getByRole("heading", { name: "Check payment-processing capacity" })).toBeInTheDocument();
+    expect(screen.getByText(/Check the status of pending payments/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve fix" })).toBeNull();
+    expect(screen.getByRole("note")).toHaveTextContent("investigation checklist");
+  });
   it("explains the fix, shows the predicted recovery and approves with the token", () => {
     const approve = vi.spyOn(api, "approve").mockResolvedValue({ ok: true });
     useStore.setState({

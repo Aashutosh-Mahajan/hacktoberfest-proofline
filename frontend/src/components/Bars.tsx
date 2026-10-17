@@ -10,9 +10,9 @@ import { useHealthStatus } from "./Health";
 
 const ReplayControls = lazy(() => import("../panels/ReplayControls").then((m) => ({ default: m.ReplayControls })));
 
-export type View = "live" | "banks" | "messages" | "ask" | "results";
+export type View = "live" | "banks" | "ask";
 const TABS: { id: View; label: string }[] = [
-  { id: "live", label: "Live" }, { id: "banks", label: "Banks" }, { id: "messages", label: "Messages" }, { id: "ask", label: "Ask" }, { id: "results", label: "Results" },
+  { id: "live", label: "Live" }, { id: "banks", label: "Banks" }, { id: "ask", label: "Ask" },
 ];
 
 const CONN: Record<string, string> = { connecting: "Connecting…", reconnecting: "Reconnecting…", offline: "Offline", replay: "Replay" };
@@ -83,6 +83,7 @@ export function SimulatePopover({ onClose }: { onClose: () => void }) {
   const [sc, setSc] = useState<Scenario>("S1");
   const [sev, setSev] = useState(1);
   const [off, setOff] = useState(6);
+  const offsetValid = Number.isFinite(off) && off >= 5 && off <= 120;
   const [busy, setBusy] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -108,10 +109,11 @@ export function SimulatePopover({ onClose }: { onClose: () => void }) {
         <span className="num">{sev.toFixed(1)}</span>
       </label>
       <label className="field row">Starts after
-        <input type="number" min={0} max={120} value={off} onChange={(e) => setOff(+e.target.value)} disabled={hidden} aria-label="Seconds until the failure starts" /> seconds
+        <input type="number" min={5} max={120} value={off} onChange={(e) => setOff(+e.target.value)} disabled={hidden} aria-label="Seconds until the failure starts" /> seconds
       </label>
+      {!offsetValid && <p className="sub" role="status">Choose a start time between 5 and 120 seconds.</p>}
       <div className="btnrow">
-        <button className="btn primary" disabled={hidden || busy} onClick={async () => { setBusy(true); await api.scenario(sc, sev, off); setBusy(false); onClose(); }}>Start failure</button>
+        <button className="btn primary" disabled={hidden || busy || !offsetValid} onClick={async () => { setBusy(true); const result = await api.scenario(sc, sev, off); setBusy(false); if (result.ok) onClose(); }}>Start failure</button>
         <button className="btn" onClick={async () => { await api.reset(); onClose(); }}>Reset to healthy</button>
       </div>
       {scoreboard.length > 0 && <div className="sub">Chaos score: <b className="num">{right}/{scoreboard.length}</b> correct</div>}

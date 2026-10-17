@@ -420,8 +420,11 @@ class Orchestrator:
             try:
                 concl, rca_parts = self._reason(incident, cancel)
             except _Inconclusive as e:
-                self._finish_inconclusive(incident, e.reason)
-                return
+                recovered = self._verified_surge_response(incident, cancel)
+                if recovered is None:
+                    self._finish_inconclusive(incident, e.reason)
+                    return
+                concl, rca_parts = recovered
             self._check(cancel)
             self._after_verified(incident, concl, rca_parts, cancel)
         except _Stop:
@@ -476,6 +479,14 @@ class Orchestrator:
         self._ctx = {"incident": {k: incident.get(k) for k in ("id", "start_ts", "detected_ts", "baseline_success", "current_success", "blast")},
                      "triage": incident["decline_breakdown"], "hypotheses": hyps,
                      "bank_changes_pp": {b: round(v * 100, 1) for b, v in d.items()}}
+        # Traffic must reach Gemma even when a small model forgets to call the traffic tool.
+        traffic = self.tel.traffic(s, max(now, s + 1000))
+        traffic_data = {"baseline_tps": traffic.get("baseline_tps"), "ratio": round(traffic.get("ratio", 1.0), 2)}
+        self.store.register("ev_metric_traffic", "metric", "Traffic vs baseline", traffic_data, ts=now)
+        self._ctx["traffic"] = traffic_data
+        traffic_hyp = self._hyps["h_traffic"]
+        traffic_hyp["reason"] = f"Payment requests are {traffic_data['ratio']:.2f} times normal; checking whether extra load explains the failures."
+        self._emit("hypothesis.update", {"incident_id": incident["id"], "hypothesis": dict(traffic_hyp)})
         if d.get(worst, 0) < -0.05 and all(v >= -0.03 for b, v in d.items() if b != worst):
             self._ctx["worst_bank"] = {"bank": worst, "d_pp": round(d[worst] * 100, 1)}
 
@@ -618,6 +629,51 @@ class Orchestrator:
             messages.append({"role": "user", "content": "VERIFIER_REJECTED\n" + json.dumps(fb)})
             self._partial = concl
 
+    def _verified_surge_response(self, incident: dict, cancel) -> Optional[tuple]:
+        """A bounded runbook for a measured overload, never a scenario-name shortcut or model claim."""
+        breakdown = incident.get("decline_breakdown") or {}
+        limited = sum(row.get("pct", 0) for row in breakdown.get("top_codes", []) if row.get("code") == "TD_RATE_LIMITED")
+        if breakdown.get("technical_pct", 0) < 70 or limited < 50:
+            return None
+        self._check(cancel)
+        iid = incident["id"]
+        self._set_state("investigating", "Checking a capacity increase against measured traffic and failures")
+        results = {}
+        for name in ("bank_stats", "traffic", "list_deploys"):
+            self._check(cancel)
+            call_id = f"surge_runbook_{name}"
+            self._emit("agent.tool_call", {"incident_id": iid, "call_id": call_id, "tool": name, "args": {}})
+            result = self.tools.call(name, {})
+            self._emit("agent.tool_result", {"incident_id": iid, "call_id": call_id, "tool": name,
+                                             "summary": trunc(result.summary, 160), "ok": result.ok,
+                                             "evidence_ids": result.evidence_ids, "ms": result.ms})
+            if not result.ok:
+                return None
+            results[name] = result
+        ratio = results["traffic"].data.get("ratio", 0)
+        banks = results["bank_stats"].data.get("banks", {})
+        affected = [bank for bank, stats in banks.items() if stats.get("d_pp", 0) <= -3]
+        if ratio < 1.8 or len(affected) < 2:
+            return None
+        # Let the same verifier reject competing deploy causes and invalid evidence.
+        evidence = list(dict.fromkeys(e for result in results.values() for e in result.evidence_ids))
+        evidence.append("ev_breakdown_triage")
+        reasons = {"deploy": "This update does not match the timing or payment path of the failures.",
+                   "bank_outage": "Several banks are affected while the payment processor is rejecting excess requests.",
+                   "business_decline": "Most failures are system errors, not customer limits or balances."}
+        conclusion = {"cause": "traffic_spike", "confidence": 0.85, "evidence_ids": evidence,
+                      "ruled_out": [{"target": h["target"], "reason": reasons.get(h["kind"], "Checked against current payment data.")}
+                                    for h in self._ctx.get("hypotheses", []) if h["target"] != "traffic_spike"],
+                      "proposed_action": self._fill_action({"kind": "scale_gateway"}, "traffic_spike", incident),
+                      "summary": f"Payment requests are {ratio:.2f} times normal, and excess-request errors affect several banks. Add payment-processing capacity to handle the extra requests.",
+                      "_via": "code: verified capacity runbook"}
+        result, preview, action = self._verify(incident, conclusion, self.max_verify + 1)
+        self._check(cancel)
+        if not result.passed or preview is None:
+            return None
+        self._thought("Gemma could not verify an explanation. The capacity runbook checked fresh data and passed the simulated recovery test; waiting for your approval.", "code", iid)
+        return conclusion, {"preview": preview, "action": action}
+
     def _mark_claimed(self, iid: str, concl: dict) -> None:
         with self._lock:
             h = next((h for h in self._hyps.values() if h["target"] == concl["cause"] and h["status"] == "open"), None)
@@ -701,6 +757,14 @@ class Orchestrator:
         ev = a.get("evidence_ids") or []
         if isinstance(ev, str):
             ev = re.findall(r"ev_[A-Za-z0-9_]+", ev) or [ev]
+        # Small models sometimes copy the display marker `ev:` along with the real ID.
+        # Remove only that wrapper; unknown IDs still fail the evidence verifier.
+        normalized_evidence = []
+        for value in ev:
+            value = str(value).strip()
+            match = re.fullmatch(r"(?:ev:)?(ev_[A-Za-z0-9_]+)", value.strip("[]`'\" "))
+            normalized_evidence.append(match.group(1) if match else value)
+        ev = list(dict.fromkeys(normalized_evidence))
         ro = []
         for r in (a.get("ruled_out") or []):
             if isinstance(r, dict) and ("target" in r or "reason" in r):
@@ -723,6 +787,12 @@ class Orchestrator:
                 a = dict(a, summary=f"Payments using {bank} are failing. No safe automatic fix can repair the bank; contact its support team, inform affected customers and monitor recovery.")
         else:
             act = None
+        if act is None:
+            # A supported explanation still needs an actionable response when the model omits this field.
+            default_kind = {"deploy": "rollback_deploy", "bank": "notify_only",
+                            "business": "notify_only", "traffic_spike": "scale_gateway"}.get(parse_cause(cause)[0])
+            if default_kind:
+                act = self._fill_action({"kind": default_kind}, cause, incident)
         try:
             conf = a.get("confidence", 0.5)
             conf = float(str(conf).rstrip("%")) / (100.0 if "%" in str(conf) else 1.0)
@@ -887,6 +957,16 @@ class Orchestrator:
             if pv:
                 action["preview"] = {"recovers": pv["recovers"], "expected_recovery_ms": pv["expected_recovery_ms"], "series": pv["predicted"]}
             action["warnings"] = self._action_warnings(a, concl["cause"], pv, concl.get("_prev_warnings"))
+            if a["kind"] == "rollback_deploy":
+                # A rollback can recover the main incident while a separate bank fault remains.
+                start = int(incident["start_ts"])
+                current_banks = self.tel.bank_stats(start, max(self._now(), start + 1000))
+                baseline_banks = self.tel.bank_stats(start - 300_000, start - 15_000)
+                changed_bank = self._bank_in(deploy)
+                for bank, stats in current_banks.items():
+                    base = baseline_banks.get(bank, {})
+                    if bank != changed_bank and stats.get("error_5xx_pct", 0) - base.get("error_5xx_pct", 0) > 1:
+                        action["warnings"].append(f"{bank} also has more bank-server errors than normal. Undoing this update will not repair that bank; contact its support team and monitor it separately.")
         rca = {"incident_id": iid, "cause": concl["cause"], "cause_label": cause_label(concl["cause"], deploy),
                "confidence": concl["confidence"],
                "evidence": [{"id": e, "kind": self.store.get(e)["kind"], "title": self.store.get(e)["title"]} for e in concl["evidence_ids"] if self.store.get(e)],

@@ -7,8 +7,6 @@ import { ActivityPanel } from "./components/Agent";
 import { RcaCard, ProposedActionCard, ResultCard, EvidenceDrawer, ChaosReveal, ChaosBanner, ErrorState, DemoPanel } from "./components/Outcome";
 
 // rarely used views are split out of the initial bundle
-const EvalView = lazy(() => import("./views/EvalView"));
-const MessagesView = lazy(() => import("./views/MessagesView"));
 const AskView = lazy(() => import("./views/AskView"));
 const FollowupDrawer = lazy(() => import("./components/FollowupDrawer"));
 const PostmortemModal = lazy(() => import("./panels/PostmortemModal").then((m) => ({ default: m.PostmortemModal })));
@@ -73,11 +71,9 @@ export function App({ onReconnect = () => {} }: { onReconnect?: () => void }) {
       {view === "banks" && (
         <main className="page"><BankTiles /><WhyFailed /></main>
       )}
-      {view !== "live" && view !== "banks" && (
+      {view === "ask" && (
         <Suspense fallback={<Loading />}>
-          {view === "messages" && <MessagesView />}
-          {view === "ask" && <AskView />}
-          {view === "results" && <EvalView />}
+          <AskView />
         </Suspense>
       )}
       {simOpen && <SimulatePopover onClose={closeSim} />}

@@ -24,7 +24,7 @@ export function RcaCard() {
             <span>Confidence <b className="num">{confidencePct(rca.confidence)}%</b></span>
             <i aria-hidden="true"><b style={{ width: confidencePct(rca.confidence) + "%" }} /></i>
           </div>
-          <p style={{ margin: "0 0 4px" }} title={rca.summary}>{rca.inconclusive ? "The available evidence does not yet confirm the cause. No automatic fix will be offered. Review the proof below or ask an engineer to investigate." : plainify(rca.summary)}</p>
+          <p style={{ margin: "0 0 4px" }} title={rca.summary}>{rca.inconclusive ? "The cause has not been confirmed yet. Follow the suggested investigation steps before changing payment settings." : plainify(rca.summary)}</p>
           <div className="subhead">Proof (tap to open)</div>
           <div className="chips">{rca.evidence.map((e) => <button key={e.id} className="evchip" onClick={() => openEv(e.id)} title={e.id + " · " + e.kind}>{e.title}</button>)}</div>
           {rca.ruled_out.map((r) => <div key={r.target} className="ruledline"><b>Not the cause:</b> {r.target}. {plainify(r.reason)}</div>)}
@@ -48,11 +48,30 @@ export function ProposedActionCard() {
   const executed = useStore((s) => s.executed);
   const rca = useStore((s) => s.rca);
   const incident = useStore((s) => s.incident);
+  const agentState = useStore((s) => s.agentState);
   const markProposal = useStore((s) => s.markProposal);
   const expired = useStore((s) => (p ? s.tickTs > p.expires_ts && p.status === "pending" : false));
   const [confirming, setConfirming] = useState(false);
   useEffect(() => { setConfirming(false); }, [p?.action.id]);
-  if (executed || (!p && !rca?.proposed_action)) return null;
+  if (executed) return null;
+  if (!p && !rca?.proposed_action) {
+    if (!incident || (!rca && agentState !== "error")) return null;
+    const rateLimited = incident.decline_breakdown.top_codes.some((c) => c.code === "TD_RATE_LIMITED" && c.pct >= 50);
+    return (
+      <section className="card fix" aria-label="Suggested response">
+        <h2>Suggested next action</h2>
+        <h3>{rateLimited ? "Check payment-processing capacity" : "Investigate the failed payments"}</h3>
+        <p className="cap">No automatic fix has passed all checks. These are manual investigation steps, not an approved automatic fix.</p>
+        <ol>
+          <li>{rateLimited ? "Compare current request volume with available processing capacity. Check which service is rejecting requests." : "Compare failures across banks and check recent software updates."}</li>
+          <li>{rateLimited ? "If our payment servers are overloaded, test adding capacity before applying the change." : "Check whether the problem is in our payment servers or at the bank or payment provider."}</li>
+          <li>Check the status of pending payments before requesting another payment attempt.</li>
+          <li>Notify the incident owner and affected users while monitoring recovery.</li>
+        </ol>
+        <p className="sub" role="note">Prepared by ProofLine's investigation checklist. A tested fix will appear for approval once the checks pass.</p>
+      </section>
+    );
+  }
   const a = p?.action ?? rca!.proposed_action!;
   // Older runs may still contain a bank-transfer proposal. Never offer to execute it or claim recovery.
   if (a.kind === "failover_bank") return (

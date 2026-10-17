@@ -27,6 +27,7 @@ def render_context(ctx: dict) -> str:
             f"declines {tr.get('technical_pct')}% technical / {tr.get('business_pct')}% business (top {codes}).\n"
             f"{('Degraded bank at triage: ' + str(ctx['worst_bank']['bank']) + ' (' + str(ctx['worst_bank']['d_pp']) + 'pp technical success).' + chr(10)) if ctx.get('worst_bank') else ''}"
             f"Bank changes vs normal (percentage points): {_j(ctx.get('bank_changes_pp', {}))}. Several negative values mean a shared problem is possible; do not blame the slightly worst bank.\n"
+            f"Measured traffic: {_j(ctx.get('traffic', {}))} [ev:ev_metric_traffic]. Ratio>=1.8 plus widespread excess-request errors supports traffic_spike; test scale_gateway.\n"
             f"Hypothesis targets (rule out or confirm each in submit_conclusion):\n{hyp}")
 
 
